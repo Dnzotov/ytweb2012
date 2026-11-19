@@ -65,13 +65,15 @@ async function video(id) {
   const related = walk(nx, 'lockupViewModel').map(fromLockup).concat(walk(nx, 'compactVideoRenderer').map(fromVideoRenderer)).filter(Boolean);
   const lm = /like this video along with ([\d,]+) other/.exec(JSON.stringify(prim)); const likes = lm ? num(lm[1]) + 1 : 0;
   const owner = (sec.owner && sec.owner.videoOwnerRenderer) || {};
+  const lc = walk(nx, 'liveChatRenderer')[0];
+  const chat = lc ? { replay: !!lc.isReplay, token: walk(lc.continuations, 'continuation')[0] || null } : null;
   const toks = walk(nx, 'continuationCommand').map(c => c.token);
   const token = toks.find(isCommentsTok), relatedNext = toks.filter(t => !isCommentsTok(t)).pop() || null;
   return {
     id, title: vd.title || text(prim.title), author: vd.author || text(owner.title), channelId: vd.channelId || (owner.navigationEndpoint && owner.navigationEndpoint.browseEndpoint && owner.navigationEndpoint.browseEndpoint.browseId),
     views: num(vd.viewCount) || num(text(prim.viewCount && prim.viewCount.videoViewCountRenderer && prim.viewCount.videoViewCountRenderer.viewCount)), dur: +vd.lengthSeconds || 0,
     date: text(prim.dateText) || '', desc: vd.shortDescription || text(sec.attributedDescription) || '', tags: (vd.keywords || []).join(', '), likes, dislikes: 0,
-    live: !!vd.isLive || !!vd.isLiveContent && !vd.lengthSeconds, category: '', playable: !!(pl.playabilityStatus && pl.playabilityStatus.status === 'OK'), reason: pl.playabilityStatus && pl.playabilityStatus.reason || '', related, relatedNext, commentsToken: token || null,
+    live: !!vd.isLive || !!vd.isLiveContent && !vd.lengthSeconds, category: '', playable: !!(pl.playabilityStatus && pl.playabilityStatus.status === 'OK'), reason: pl.playabilityStatus && pl.playabilityStatus.reason || '', related, relatedNext, commentsToken: token || null, chat: chat && chat.token ? chat : null,
   };
 }
 
@@ -258,4 +260,51 @@ async function liveQualities(id) {
   const t = (await getText(m)).body.toString(); return { heights: heightsOf(t), audio: audioOf(t) };
 }
 
-module.exports = { qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };
+// ---- live chat (live streams and stream recordings) ----
+const runsText = runs => (runs || []).map(r => r.text != null ? r.text : (r.emoji ? (r.emoji.isCustomEmoji ? (r.emoji.shortcuts || [''])[0] : r.emoji.emojiId) : '')).join('');
+function chatItem(a) {
+  const m = a.liveChatTextMessageRenderer || a.liveChatPaidMessageRenderer; if (!m) return null;
+  return { id: m.id, author: text(m.authorName), text: runsText(m.message && m.message.runs), paid: m.purchaseAmountText ? text(m.purchaseAmountText) : '',
+    owner: !!(m.authorBadges || []).find(b => /OWNER/.test(JSON.stringify(b))), mod: !!(m.authorBadges || []).find(b => /MODERATOR/.test(JSON.stringify(b))) };
+}
+async function chatPage(token, replayMs) {
+  const replay = replayMs != null;
+  const r = await post(replay ? 'live_chat/get_live_chat_replay' : 'live_chat/get_live_chat', replay ? { continuation: token, currentPlayerState: { playerOffsetMs: String(Math.max(0, replayMs | 0)) } } : { continuation: token }, 'WEB');
+  const items = [];
+  if (replay) for (const ra of walk(r, 'replayChatItemAction')) { const off = +ra.videoOffsetTimeMsec || 0; for (const it of walk(ra.actions, 'item')) { const c = chatItem(it); if (c) items.push({ ...c, ms: off }); } }
+  else for (const it of walk(walk(r, 'addChatItemAction'), 'item')) { const c = chatItem(it); if (c) items.push(c); }
+  const cd = (walk(r, 'continuations')[0] || [])[0] || {};
+  const k = cd.invalidationContinuationData || cd.timedContinuationData || cd.liveChatReplayContinuationData || cd.reloadContinuationData || {};
+  return { items, next: k.continuation || null, timeoutMs: k.timeoutMs || 5000 };
+}
+
+// ---- posting (needs Google sign-in) ----
+// createCommentParams is a small protobuf { 2: videoId, 5: { 1: 0 }, 10: 7 }, the same message the YouTube apps send.
+function commentParams(id) {
+  const vid = Buffer.from(id);
+  return encodeURIComponent(Buffer.concat([Buffer.from([0x12, vid.length]), vid, Buffer.from([0x2a, 0x02, 0x08, 0x00, 0x50, 0x07])]).toString('base64'));
+}
+const ok = r => r && !r.error && (r.actionResult ? r.actionResult.status === 'STATUS_SUCCEEDED' : !!(r.actions && r.actions.length));
+async function postAuthed(endpoint, body) {
+  const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to post'); e.code = 401; throw e; }
+  let last;
+  for (const c of ['TV', 'WEB']) {   // the TV client accepts the OAuth token (WEB answers 400 to it)
+    try { const r = await post(endpoint, body, c, tok); if (ok(r)) return r; last = r; } catch (e) { last = { error: { message: e.message } }; }
+  }
+  throw new Error((last && last.error && last.error.message) || 'YouTube refused the request');
+}
+async function addComment(id, textMsg) {
+  await postAuthed('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
+  const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg, time: 'just now' };
+}
+async function sendChat(id, textMsg) {
+  const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to chat'); e.code = 401; throw e; }
+  // the "send" params only come with a signed-in watch page
+  let params = null;
+  for (const c of ['TV', 'WEB']) { try { const nx = await post('next', { videoId: id }, c, tok); params = (walk(nx, 'sendLiveChatMessageEndpoint')[0] || {}).params; if (params) break; } catch (e) {} }
+  if (!params) throw new Error('Chat is not available for this account');
+  await postAuthed('live_chat/send_message', { params, richMessage: { textSegments: [{ text: textMsg }] } });
+  const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg };
+}
+
+module.exports = { chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };

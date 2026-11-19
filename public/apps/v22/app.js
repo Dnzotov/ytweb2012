@@ -275,12 +275,25 @@
     await fillList(related, v.relatedPage, videoItem);
     const cm = v.commentsPage || await API.comments(v.commentsToken);
     const add = await V.inflate('add_comment_button', null).catch(() => null);
-    const addBtn = el('div', '', { margin: '6px 5px', padding: '12px', textAlign: 'center', fontSize: '13px', cursor: 'pointer', color: '#fff', border: '1px solid #444', borderRadius: '6px', background: 'linear-gradient(#444,#222)' }); addBtn.textContent = S('comment_hint'); addBtn.onclick = () => commentDialog(comments);
+    const addBtn = el('div', '', { margin: '6px 5px', padding: '12px', textAlign: 'center', fontSize: '13px', cursor: 'pointer', color: '#fff', border: '1px solid #444', borderRadius: '6px', background: 'linear-gradient(#444,#222)' }); addBtn.textContent = S('comment_hint'); addBtn.onclick = () => commentDialog(comments, v);
     const commentItem = async c => { const it = await V.inflate('comment_item', null); V.find(it, 'author').querySelector('.t').textContent = c.author; V.find(it, 'comment').querySelector('.t').textContent = c.text; V.find(it, 'time').querySelector('.t').textContent = c.time; return it; };
     await fillList(comments, cm, commentItem, 'no_comments_found'); comments.prepend(addBtn);
     // pages: tabs from the original tag strings
     const pages = [infoPage, related, comments]; pages.forEach(p => { p.style.width = '100%'; p.style.height = '100%'; });
     infoPage.style.display = 'grid'; infoPage.__disp = 'grid';
+    // Streams and stream recordings: the leftmost tab is the chat, with the related videos below it.
+    let chatPage = null;
+    if (v.chat && !v.demo) {
+      const chat = makeChat(v, player.querySelector('video')); player.__chat = chat;
+      const prevCleanup = root.__cleanup; root.__cleanup = () => { chat.stop(); prevCleanup && prevCleanup(); };
+      chatPage = el('div', 'chat-page', { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: '0' });
+      chat.el.style.flex = '0 0 55%'; chat.el.style.borderBottom = '1px solid #333';
+      const relHead = el('div', '', { background: 'linear-gradient(#555,#222)', color: '#fff', fontSize: '14px', padding: '2px 8px', flex: '0 0 auto' }); relHead.textContent = S('video_info_related_label_text');
+      chatPage.append(chat.el, relHead, related);
+      Object.assign(related.style, { flex: '1 1 0', minHeight: '0', height: 'auto', width: '100%', position: 'relative', overflowY: 'auto' });
+      chatPage.__disp = 'flex';
+      chat.start();
+    }
     if (TABLET) {
       // layout-sw600dp/watch_controller.xml: player + info on the left, Related (2-column grid) / Comments tabs on the right
       await fillList(related, v.relatedPage, videoItem, null, 2);
@@ -292,11 +305,17 @@
       infoPage.style.flex = '1 1 0'; infoPage.style.minHeight = '0'; infoPage.style.height = 'auto'; left.appendChild(infoPage);
       right.append(tabrow, ws); ws.style.flex = '1 1 0'; ws.style.minHeight = '0'; ws.style.height = 'auto'; ws.style.position = 'relative';
       body.append(left, right);
+      if (chatPage) {
+        Object.assign(chatPage.style, { position: 'absolute', inset: '0', height: 'auto' }); comments.style.position = 'absolute'; comments.style.inset = '0'; comments.style.height = 'auto';
+        await tabs(root, [player.__chat.title, S('comments')], [chatPage, comments]);
+        infoPage.style.display = 'grid'; return root;
+      }
       [related, comments].forEach(p => { p.style.position = 'absolute'; p.style.inset = '0'; p.style.height = 'auto'; });
       await tabs(root, [S('video_info_related_label_text'), S('comments')], [related, comments]);
       infoPage.style.display = 'grid';
       return root;
     }
+    if (chatPage) { await tabs(root, [player.__chat.title, S('video_info'), S('comments')], [chatPage, infoPage, comments]); return root; }
     await tabs(root, [S('video_info'), S('video_info_related_label_text'), S('comments')], pages);
     return root;
   };
@@ -404,7 +423,27 @@
     const toggleFs = () => { if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document); else if (P.requestFullscreen) P.requestFullscreen().then(() => window.screen.orientation && window.screen.orientation.lock && window.screen.orientation.lock('landscape').catch(() => {})).catch(() => vid.webkitEnterFullscreen && vid.webkitEnterFullscreen()); else if (P.webkitRequestFullscreen) P.webkitRequestFullscreen(); else if (vid.webkitEnterFullscreen) vid.webkitEnterFullscreen(); };
     fs.onclick = e => { e.stopPropagation(); toggleFs(); };
     P.addEventListener('dblclick', e => { e.preventDefault(); toggleFs(); });
-    const onFs = () => { const on = !!(document.fullscreenElement || document.webkitFullscreenElement); fs.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreen${on ? 'on' : 'off'}.png)`; P.style.aspectRatio = on ? 'auto' : '16/9'; };
+    // Live chat over the video in fullscreen (not on iOS, which uses its own fullscreen player). Closing it lasts until the
+    // next time fullscreen is entered; the "Chat" button in the controls brings it back.
+    const chatFs = el('div', 'chat-fs', { position: 'absolute', top: 0, right: 0, bottom: 0, width: 'min(360px, 38%)', background: 'rgba(0,0,0,.6)', display: 'none', flexDirection: 'column', zIndex: 4, borderLeft: '1px solid rgba(255,255,255,.15)' });
+    const chatFsHead = el('div', '', { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 10px', background: 'linear-gradient(#555,#222)', fontSize: '14px', color: '#fff' });
+    const chatFsTitle = el('span'); const chatFsX = el('span', '', { cursor: 'pointer', fontSize: '18px', padding: '0 4px' }); chatFsX.textContent = '✕';
+    chatFsHead.append(chatFsTitle, chatFsX); chatFs.appendChild(chatFsHead); P.appendChild(chatFs);
+    ['click', 'dblclick', 'pointerdown'].forEach(ev => chatFs.addEventListener(ev, e => e.stopPropagation()));
+    const chatBtn = el('div', '', { position: 'absolute', right: '8px', top: '50px', padding: '4px 8px', fontSize: '12px', fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,.6)', border: '1px solid #777', borderRadius: '3px', cursor: 'pointer', display: 'none' });
+    chatBtn.textContent = 'Chat'; hud.appendChild(chatBtn);
+    let chatClosed = false, chatHome = null;
+    const fsOn = () => !!(document.fullscreenElement || document.webkitFullscreenElement);
+    const layoutChat = () => {
+      const c = P.__chat, on = fsOn() && c && !isApple;
+      if (on && !chatClosed) { if (!chatHome) { chatHome = document.createComment('chat'); c.el.parentNode && c.el.parentNode.insertBefore(chatHome, c.el); } chatFsTitle.textContent = c.title; chatFs.appendChild(c.el); chatFs.style.display = 'flex'; c.el.style.flex = '1 1 0'; c.scrollEnd(); }
+      else { chatFs.style.display = 'none'; if (chatHome && c) { chatHome.parentNode.insertBefore(c.el, chatHome); chatHome.remove(); chatHome = null; c.el.style.flex = ''; c.scrollEnd(); } }
+      chatBtn.style.display = on && chatClosed ? 'block' : 'none';
+    };
+    chatFsX.onclick = () => { chatClosed = true; layoutChat(); };
+    chatBtn.onclick = e => { e.stopPropagation(); chatClosed = false; layoutChat(); };
+    P.__layoutChat = layoutChat;
+    const onFs = () => { const on = fsOn(); fs.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreen${on ? 'on' : 'off'}.png)`; P.style.aspectRatio = on ? 'auto' : '16/9'; if (on) chatClosed = false; layoutChat(); };
     document.addEventListener('fullscreenchange', onFs); document.addEventListener('webkitfullscreenchange', onFs);
     // buffering spinner
     const spin = el('div', 'spinner', { position: 'absolute', left: '50%', top: '50%', width: '36px', height: '36px', margin: '-18px 0 0 -18px', display: 'none', pointerEvents: 'none', borderColor: 'rgba(255,255,255,.25)', borderTopColor: '#fff' }); P.appendChild(spin);
@@ -415,10 +454,23 @@
     P.addEventListener('click', e => { if (hud.style.opacity === '0') show(); else if (e.target === vid || e.target === hud || e.target === shade) { hud.style.opacity = hud.style.opacity === '0' ? 1 : 0; hud.style.pointerEvents = hud.style.opacity === '0' ? 'none' : 'auto'; } });
     vid.addEventListener('play', () => { setGlyph(true); show(); }); vid.addEventListener('pause', () => { setGlyph(false); show(); });
     vid.addEventListener('ended', () => { setGlyph(false); show(); });
-    vid.addEventListener('timeupdate', () => { const f = vid.currentTime / (vid.duration || v.dur || 1); prog.style.width = f * 100 + '%'; knob.style.left = f * 100 + '%'; tcur.textContent = fmtTime(vid.currentTime); });
+    const paintF = f => { prog.style.width = f * 100 + '%'; knob.style.left = f * 100 + '%'; };
+    let drag = false, dragF = 0;
+    vid.addEventListener('timeupdate', () => { if (!drag) paintF(vid.currentTime / (vid.duration || v.dur || 1)); tcur.textContent = fmtTime(vid.currentTime); });
     vid.addEventListener('loadedmetadata', () => { ttot.textContent = fmtTime(vid.duration); });
-    const seek = e => { const r = bar.getBoundingClientRect(); const f = Math.min(1, Math.max(0, ((e.touches ? e.touches[0].clientX : e.clientX) - r.left) / r.width)); vid.currentTime = f * (vid.duration || v.dur || 1); };
-    let drag = false; bar.addEventListener('pointerdown', e => { drag = true; e.stopPropagation(); seek(e); bar.setPointerCapture(e.pointerId); }); bar.addEventListener('pointermove', e => drag && seek(e)); bar.addEventListener('pointerup', () => drag = false);
+    // Scrubbing: the knob follows the finger, a bubble above it shows the target time, the seek happens on release.
+    const bubble = el('div', '', { position: 'absolute', bottom: '56px', transform: 'translateX(-50%)', background: 'rgba(0,0,0,.85)', color: '#fff', fontSize: '13px', fontWeight: 700, padding: '3px 8px', borderRadius: '3px', border: '1px solid #666', display: 'none', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 3 });
+    bar.appendChild(bubble);
+    const durNow = () => vid.duration && isFinite(vid.duration) ? vid.duration : (v.dur || 1);
+    const fAt = e => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
+    const showBubble = f => { bubble.style.display = 'block'; bubble.style.left = f * 100 + '%'; bubble.textContent = fmtTime(f * durNow()); };
+    bar.style.touchAction = 'none';
+    bar.addEventListener('pointerdown', e => { e.stopPropagation(); drag = true; bar.setPointerCapture(e.pointerId); dragF = fAt(e); paintF(dragF); showBubble(dragF); clearTimeout(hideT); hud.style.opacity = 1; });
+    bar.addEventListener('pointermove', e => { if (drag) { dragF = fAt(e); paintF(dragF); showBubble(dragF); } else if (e.pointerType === 'mouse') showBubble(fAt(e)); });
+    const endDrag = () => { if (!drag) return; drag = false; bubble.style.display = 'none'; vid.currentTime = dragF * durNow(); show(); };
+    bar.addEventListener('pointerup', endDrag); bar.addEventListener('pointercancel', endDrag);
+    bar.addEventListener('pointerleave', () => { if (!drag) bubble.style.display = 'none'; });
+    bar.addEventListener('click', e => e.stopPropagation());
     bar.style.padding = '18px 0'; bar.style.backgroundClip = 'content-box'; bar.style.height = '40px'; bar.style.bottom = '-4px'; // bigger touch target
     prog.style.top = '18px'; prog.style.bottom = '18px'; knob.style.top = '-12px'; shade.style.pointerEvents = 'none';
     const track = el('div', '', { position: 'absolute', left: 0, right: 0, top: '18px', height: '4px', background: '#212121' }); bar.insertBefore(track, prog); bar.style.background = 'transparent';
@@ -475,14 +527,81 @@
     }
     o.appendChild(box); V.layoutTree(box);
   }
-  function commentDialog(list) {
+  function commentDialog(list, v) {
     const o = overlayBase('rgba(0,0,0,.6)');
     const box = el('div', '', { position: 'absolute', left: '10px', right: '10px', top: '60px', background: '#222', border: '1px solid #666', borderRadius: '6px', padding: '10px' });
     const t = el('div', '', { fontSize: '18px', marginBottom: '8px' }); t.textContent = S('comment_dialog_title');
-    const ta = el('textarea', '', { width: '100%', height: '90px', fontSize: '14px', fontFamily: 'inherit', padding: '6px' }); ta.placeholder = S('comment_hint');
+    const ta = el('textarea', '', { width: '100%', height: '90px', fontSize: '14px', fontFamily: 'inherit', padding: '6px' }); ta.placeholder = S('comment_hint'); ta.maxLength = 10000;
     const b = el('div', '', { marginTop: '8px', textAlign: 'center', padding: '10px', border: '1px solid #555', borderRadius: '4px', background: 'linear-gradient(#444,#222)', cursor: 'pointer' }); b.textContent = S('comment_post_button');
-    b.onclick = async () => { if (ta.value.trim()) { D.comments.unshift({ author: D.me.name, text: ta.value.trim(), time: 'just now' }); closeDialogs(); toast(S('comment_done')); const it = await V.inflate('comment_item', null); V.find(it, 'author').querySelector('.t').textContent = D.me.name; V.find(it, 'comment').querySelector('.t').textContent = ta.value; V.find(it, 'time').querySelector('.t').textContent = 'just now'; list.insertBefore(it, list.children[1]); V.layoutTree(it); } };
+    let busy = false;
+    b.onclick = async () => {
+      const text = ta.value.trim(); if (!text || busy) return;
+      if (v.demo) return toast('Demo video: comments are not sent');
+      busy = true; b.textContent = '…';
+      try {
+        const c = await API.addComment(v.id, text);
+        closeDialogs(); toast(S('comment_done'));
+        const it = await V.inflate('comment_item', null); V.find(it, 'author').querySelector('.t').textContent = c.author; V.find(it, 'comment').querySelector('.t').textContent = c.text; V.find(it, 'time').querySelector('.t').textContent = c.time;
+        list.insertBefore(it, list.children[1] || null); V.layoutTree(it);
+      } catch (e) { busy = false; b.textContent = S('comment_post_button'); toast(e.status === 401 ? 'Sign in (Settings → Google account) to comment' : 'Comment not posted: ' + e.message); }
+    };
     box.append(t, ta, b); o.appendChild(box); ta.focus();
+  }
+
+  // ---- live chat / chat replay ----
+  function makeChat(v, vid) {
+    const replay = v.chat.replay, title = replay ? 'Chat replay' : 'Live chat';
+    const box = el('div', 'chat', { display: 'flex', flexDirection: 'column', minHeight: '0', background: '#000' });
+    const list = el('div', '', { flex: '1 1 0', minHeight: '0', overflowY: 'auto', padding: '4px 6px', fontSize: '13px', lineHeight: 1.3 });
+    box.appendChild(list);
+    const note = el('div', '', { color: '#888', padding: '6px 0', textAlign: 'center' }); note.textContent = 'Loading chat…'; list.appendChild(note);
+    if (!replay) {
+      const row = el('div', '', { display: 'flex', gap: '4px', padding: '4px', borderTop: '1px solid #333', background: '#111' });
+      const inp = el('input', '', { flex: '1', minWidth: '0', fontSize: '14px', padding: '7px', border: '1px solid #666', borderRadius: '3px', background: '#fff', color: '#000', fontFamily: 'inherit' }); inp.placeholder = 'Say something…'; inp.maxLength = 200;
+      const send = el('div', '', { padding: '0 12px', display: 'flex', alignItems: 'center', border: '1px solid #555', borderRadius: '3px', background: 'linear-gradient(#444,#222)', color: '#fff', fontSize: '13px', cursor: 'pointer' }); send.textContent = 'Send';
+      const go_ = async () => { const t = inp.value.trim(); if (!t) return; send.textContent = '…'; try { const m = await API.sendChat(v.id, t); inp.value = ''; add([{ ...m, id: 'me' + Date.now() }]); } catch (e) { toast(e.status === 401 ? 'Sign in (Settings → Google account) to chat' : 'Message not sent: ' + e.message); } send.textContent = 'Send'; };
+      send.onclick = go_; inp.addEventListener('keydown', e => { if (e.key === 'Enter') go_(); });
+      row.append(inp, send); box.appendChild(row);
+    }
+    const nearEnd = () => list.scrollHeight - list.scrollTop - list.clientHeight < 60;
+    const scrollEnd = () => { list.scrollTop = list.scrollHeight; };
+    const seen = new Set();
+    function add(items) {
+      if (!items.length) return; const stick = nearEnd(); if (note.isConnected) note.remove();
+      for (const m of items) {
+        if (m.id && seen.has(m.id)) continue; if (m.id) seen.add(m.id);
+        const line = el('div', '', { padding: '2px 0', wordBreak: 'break-word', color: '#fff' });
+        if (m.paid) { line.style.background = 'rgba(221,0,0,.35)'; line.style.padding = '3px 4px'; }
+        const au = el('span', '', { fontWeight: 700, color: m.owner ? '#ffd600' : m.mod ? '#7fa6ff' : '#aaa', marginRight: '5px' }); au.textContent = m.author + (m.paid ? ' ' + m.paid : '');
+        const tx = el('span'); tx.textContent = m.text; line.append(au, tx); list.appendChild(line);
+      }
+      while (list.children.length > 250) list.firstChild.remove();   // keep the chat light
+      if (stick) scrollEnd();
+    }
+    let stopped = false, timer = null;
+    const sleep = ms => new Promise(r => { timer = setTimeout(r, ms); });
+    async function liveLoop() {
+      let tok = v.chat.token;
+      while (!stopped && tok) {
+        try { const r = await API.chat(tok); add(r.items); tok = r.next; await sleep(Math.min(10000, Math.max(1500, r.timeoutMs || 5000))); }
+        catch (e) { await sleep(8000); }
+      }
+      if (!stopped) note.textContent = 'Chat has ended';
+    }
+    // replay: messages carry their video offset; fetch ahead of the playhead, show what is due, restart after a seek
+    async function replayLoop() {
+      let buf = [], cont = null, fetchedTo = -1, last = -1, busy = false;
+      const fetchAt = async (tok, ms) => { busy = true; try { const r = await API.chat(tok, ms); buf.push(...r.items); cont = r.next; fetchedTo = r.items.length ? Math.max(fetchedTo, r.items[r.items.length - 1].ms) : ms + 30000; } catch (e) {} busy = false; };
+      while (!stopped) {
+        const t = (vid.currentTime || 0) * 1000;
+        if (last >= 0 && Math.abs(t - last) > 15000) { buf = []; cont = null; fetchedTo = -1; list.replaceChildren(); seen.clear(); }
+        last = t;
+        if (!busy && fetchedTo < t + 10000) fetchAt(cont || v.chat.token, t);
+        const due = buf.filter(m => m.ms <= t); if (due.length) { buf = buf.filter(m => m.ms > t); add(due); }
+        await sleep(500);
+      }
+    }
+    return { el: box, title, scrollEnd, start() { (replay ? replayLoop : liveLoop)(); }, stop() { stopped = true; clearTimeout(timer); } };
   }
 
   // ---- dialogs in the Froyo style ----

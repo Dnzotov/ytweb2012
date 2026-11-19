@@ -59,6 +59,10 @@
       const load = async t => { const r = await get('/api/comments?t=' + encodeURIComponent(t)); return { items: r.items, more: r.next ? () => load(r.next) : null }; };
       try { return await load(token); } catch (e) { return { items: [], more: null }; }
     },
+    async chat(token, ms) { const r = await get('/api/chat?t=' + encodeURIComponent(token) + (ms != null ? '&ms=' + Math.floor(ms) : '')); return r; },
+    async postJSON(path, body) { const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }); const d = await r.json().catch(() => ({})); if (!r.ok) { const e = new Error(d.error || 'Failed'); e.status = r.status; throw e; } return d; },
+    addComment(id, text) { return this.postJSON('/api/comment', { id, text }); },
+    sendChat(id, text) { return this.postJSON('/api/chat/send', { id, text }); },
     async authStatus() { try { return await get('/api/auth/status'); } catch (e) { return { signedIn: false }; } },
     async authStart() { const r = await fetch('/api/auth/start', { method: 'POST' }); if (!r.ok) throw new Error('sign-in unavailable'); return r.json(); },
     authPoll() { return get('/api/auth/poll'); },

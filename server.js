@@ -31,6 +31,18 @@ http.createServer((req, res) => {
   if (u.pathname === '/api/search') return json(() => yt.search(u.searchParams.get('q') || '', u.searchParams.get('c')));
   if (u.pathname === '/api/video' && ID.test(u.searchParams.get('id'))) return json(() => yt.video(u.searchParams.get('id')));
   if (u.pathname === '/api/related' && u.searchParams.get('c')) return json(() => yt.related(u.searchParams.get('c')));
+  if (u.pathname === '/api/chat' && u.searchParams.get('t')) return json(() => yt.chatPage(u.searchParams.get('t'), u.searchParams.has('ms') ? +u.searchParams.get('ms') : null));
+  if (req.method === 'POST' && (u.pathname === '/api/comment' || u.pathname === '/api/chat/send')) {
+    let b = ''; req.on('data', d => { b += d; if (b.length > 20000) req.destroy(); });
+    req.on('end', async () => {
+      let d = {}; try { d = JSON.parse(b); } catch (e) {}
+      const textMsg = String(d.text || '').trim().slice(0, u.pathname === '/api/comment' ? 10000 : 200);
+      if (!ID.test(d.id || '') || !textMsg) { res.writeHead(400, { 'Content-Type': 'application/json' }); return res.end('{"error":"bad request"}'); }
+      try { const r = await (u.pathname === '/api/comment' ? yt.addComment(d.id, textMsg) : yt.sendChat(d.id, textMsg)); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); }
+      catch (e) { res.writeHead(e.code === 401 ? 401 : 502, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); }
+    });
+    return;
+  }
   if (u.pathname === '/api/comments' && u.searchParams.get('t')) return json(() => yt.comments(u.searchParams.get('t')));
   let m;
   if (u.pathname === '/api/auth/status') return json(async () => ({ signedIn: auth.signedIn(), profile: auth.signedIn() ? await yt.account() : null }));
