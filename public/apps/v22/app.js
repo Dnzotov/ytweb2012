@@ -216,25 +216,51 @@
     for (let i = 0; i < 4; i++) { const p = newPage(); await fillList(p, lists[i], videoItem); pages.push(p); }
     await tabs(root, names.map(S), pages); return root;
   };
-  async function channelScreen(layout, who, own) {
+  // Channel screens with real data. Own channel: needs a sign-in; tabs Uploads / Favorites (liked videos) /
+  // Playlists / Subscriptions. Other channels: Uploads / Favorites (empty, YouTube dropped them) / Activity (live) / Playlists.
+  async function playlistItem(p) { const it = await simpleItem('playlist_item', p.title + (p.count ? '  (' + p.count + ')' : ''), () => go('playlist', { pid: p.pid, title: p.title })); return it; }
+  async function channelItem(c) { const it = await simpleItem('subscription_item', c.title, () => go('channel', { cid: c.cid, who: c.title })); return it; }
+  async function channelScreen(layout, who, own, cid) {
     const root = await V.inflate(layout, null);
-    const btns = await homeButtons();
-    await header(root, { buttons: btns });
-    const me = D.me;
-    const acc = own ? await API.authStatus() : null;
-    V.find(root, 'channel_title').querySelector('.t').textContent = own ? ((acc && acc.profile && acc.profile.name) || me.name) : who;
-    const st = (id, t) => { V.find(root, id).querySelector('.t').innerHTML = t.replace(/<font color='(\w+)'>/g, '<span style="color:$1">').replace(/<\/font>/g, '</span>'); };
-    st('channel_views', own ? fmtS('channel_stats_views', me.views) : fmtS('channel_stats_views', 120344));
-    st('channel_uploaded', own ? fmtS('channel_stats_uploaded', me.uploaded) : fmtS('channel_stats_uploaded', 24));
-    st('channel_subscribers', own ? fmtS('channel_stats_subscribers', me.subscribers) : fmtS('channel_stats_subscribers', 5120));
-    const av = V.find(root, 'channel_avatar'); av.__img.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_launcher_youtube.png)`; av.__img.style.backgroundSize = 'cover'; av.style.background = '#222';
-    const vids = own ? me.uploads.map(v => ({ ...v, thumb: v.clip.thumb, src: v.clip.src })) : await API.search(who);
+    await header(root, { buttons: await homeButtons() });
+    const set = (id, html) => { V.find(root, id).querySelector('.t').innerHTML = html; };
+    const stat = (name, n) => fmtS(name, n).replace(/<font color='(\w+)'>/g, '<span style="color:$1">').replace(/<\/font>/g, '</span>');
+    const av = V.find(root, 'channel_avatar'); av.style.background = '#222'; av.__img.style.backgroundSize = 'cover';
+    const setAvatar = url => { av.__img.style.backgroundImage = `url(${url ? '/avatar?u=' + btoa(url.replace(/=s\d+-/, '=s176-')).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') : 'apps/v22/res/drawable-hdpi-v4/ic_launcher_youtube.png'})`; };
     const up = newPage(), fav = newPage(), pl = newPage(), extra = newPage();
-    await fillList(up, vids, videoItem, 'no_uploads_found');
-    await fillList(fav, own ? me.favorites.map(v => ({ ...v, thumb: v.clip.thumb, src: v.clip.src })) : [], videoItem, 'no_favorites_found');
-    await fillList(pl, own ? me.playlists : ['Favorites mix', 'Best of'], t => simpleItem('playlist_item', t, () => go('results', { q: '' })), 'no_playlists_found');
-    if (own) { await fillList(extra, me.subscriptions, t => simpleItem('subscription_item', t, () => go('channel', { who: t })), 'no_subscriptions_found'); }
-    else { await fillList(extra, [], null, 'no_events_found'); }
+    let meInfo = null;
+    if (own) {
+      const st = await API.authStatus(); meInfo = st.signedIn ? st.profile : null;
+      if (!meInfo) {
+        V.find(root, 'channel_title').querySelector('.t').textContent = 'Not signed in';
+        set('channel_views', 'Settings → Google account'); set('channel_uploaded', ''); set('channel_subscribers', ''); setAvatar(null);
+        [up, fav, pl, extra].forEach(p => { const m = el('div', '', { padding: '20px', textAlign: 'center', color: '#888', fontSize: '15px' }); m.textContent = 'Sign in to see your channel'; p.appendChild(m); });
+      } else cid = meInfo.cid;
+    } else if (!cid && who) cid = (await API.findChannel(who)).cid;
+    if (cid) {
+      const [ch, vids, pls] = await Promise.all([API.channel(cid).catch(() => null), API.channelTab(cid, 'videos').catch(() => ({ items: [], more: null })), API.channelTab(cid, 'playlists').catch(() => ({ items: [], more: null }))]);
+      const title = (ch && ch.title) || (meInfo && meInfo.name) || who || '';
+      V.find(root, 'channel_title').querySelector('.t').textContent = title;
+      set('channel_views', (ch && ch.handle) || (meInfo && meInfo.handle) || '');
+      set('channel_uploaded', ch && ch.videos ? stat('channel_stats_uploaded', ch.videos) : S('channel_stats_uploaded_empty'));
+      set('channel_subscribers', ch && ch.subscribers ? stat('channel_stats_subscribers', ch.subscribers) : S('channel_stats_subscribers_empty'));
+      setAvatar((ch && ch.avatar) || (meInfo && meInfo.avatar));
+      vids.items = vids.items.map(x => ({ ...x, author: x.author || title }));
+      await fillList(up, vids, videoItem, 'no_uploads_found');
+      await fillList(pl, pls, playlistItem, 'no_playlists_found');
+      if (own) {
+        const [lk, subs] = await Promise.all([API.liked(), API.subscriptions()]);
+        await fillList(fav, lk, videoItem, 'no_favorites_found');
+        await fillList(extra, subs, channelItem, 'no_subscriptions_found');
+      } else {
+        await fillList(fav, [], null, 'no_favorites_found');
+        await fillList(extra, await API.channelTab(cid, 'live').catch(() => []), videoItem, 'no_events_found');
+      }
+    } else if (!own || meInfo) {
+      V.find(root, 'channel_title').querySelector('.t').textContent = (meInfo && meInfo.name) || who || '';
+      setAvatar(meInfo && meInfo.avatar); set('channel_views', ''); set('channel_uploaded', ''); set('channel_subscribers', '');
+      await fillList(up, [], null, 'no_uploads_found'); await fillList(fav, [], null, 'no_favorites_found'); await fillList(pl, [], null, 'no_playlists_found'); await fillList(extra, [], null, own ? 'no_subscriptions_found' : 'no_events_found');
+    }
     const labels = own ? ['channel_uploads', 'channel_favorites', 'channel_playlists', 'channel_subscriptions'] : ['channel_uploads', 'channel_favorites', 'channel_activity', 'channel_playlists'];
     const pages = own ? [up, fav, pl, extra] : [up, fav, extra, pl];
     if (TABLET) {
@@ -251,7 +277,13 @@
     await tabs(root, labels.map(S), pages); return root;
   }
   routes.mychannel = () => channelScreen('my_channel_activity', null, true);
-  routes.channel = ({ who }) => channelScreen('channel_activity', who, false);
+  routes.channel = ({ who, cid }) => channelScreen('channel_activity', who, false, cid);
+  routes.playlist = async ({ pid, title }) => {
+    const root = await V.inflate('results_activity', null);
+    const p = await API.playlist(pid).catch(() => ({ title: title || '', items: [], more: null }));
+    await header(root, { buttons: await homeButtons(), title: p.title || title || '' });
+    await fillList(V.find(root, 'videos'), p, videoItem); return root;
+  };
 
   // ---- watch ----
   routes.watch = async ({ id }) => {
@@ -267,7 +299,7 @@
     set('title', v.title); set('date_added', v.date);
     set('views_likes_dislikes', fmtS('num_views_likes_and_dislikes', v.views, v.likes, v.dislikes));
     set('channel', v.author); set('description', v.desc); set('category', v.category || '-'); set('tags', v.tags || '-');
-    V.find(root, 'to_channel').onclick = () => go('channel', { who: v.author }); V.find(root, 'to_channel').style.cursor = 'pointer';
+    V.find(root, 'to_channel').onclick = () => go('channel', { who: v.author, cid: v.channelId }); V.find(root, 'to_channel').style.cursor = 'pointer';
     const ch = V.find(root, 'channel'); ch.style.padding = '0 14px'; ch.style.cursor = 'pointer';
     const ws = V.find(root, 'workspace');
     const infoPage = ws.querySelector('[data-id="watch_video_info"]');
@@ -635,16 +667,32 @@
   async function arrayOf(name) { const d = await RT.xml('values/arrays.xml'); const n = [...d.documentElement.children].find(c => c.getAttribute('name') === name); return n ? [...n.children].map(c => RT.ref(c.textContent.trim())) : []; }
 
   // ---- Google account ----
+  // One "Google account" entry with two ways to sign in:
+  //  1. a code at google.com/device (TV sign-in): recommendations, comments, liked videos, subscriptions
+  //  2. youtube.com cookies: all of the above plus writing in live chat
   async function accountDialog() {
     const st = await API.authStatus();
     if (st.signedIn) {
-      return dialog('Google account', para((st.profile && st.profile.name) || 'Signed in'), [['Sign out', async () => { await API.authLogout(); closeDialogs(); toast('Signed out'); go('settings', {}, true); }], ['Close', closeDialogs]]);
+      const p = st.profile || {};
+      const b = el('div'); b.appendChild(para((p.name || 'Signed in') + (p.handle ? '  ' + p.handle : '')));
+      const m = para(p.method === 'cookies' ? 'Signed in with youtube.com cookies.' : 'Signed in with a code (TV sign-in). Live chat needs cookies; you can add them below.'); m.style.color = '#aaa'; m.style.marginTop = '6px'; b.appendChild(m);
+      const btns = [['Sign out', async () => { await API.authLogout(); closeDialogs(); toast('Signed out'); go('settings', {}, true); }]];
+      if (p.method !== 'cookies') btns.push(['Add cookies', () => { closeDialogs(); cookiesDialog(); }]);
+      btns.push(['Close', closeDialogs]);
+      return dialog('Google account', b, btns);
     }
+    const b = el('div');
+    const opt = (title, sub, fn) => { const it = el('div', '', { padding: '12px 4px', borderBottom: '1px solid #444', cursor: 'pointer' }); const t1 = el('div', '', { fontSize: '18px' }); t1.textContent = title; const t2 = el('div', '', { fontSize: '13px', color: '#aaa' }); t2.textContent = sub; it.append(t1, t2); it.onclick = () => { closeDialogs(); fn(); }; b.appendChild(it); };
+    opt('Sign in with a code', 'Enter a code at google.com/device. Recommendations, comments, your channel. No live chat.', codeSignIn);
+    opt('Sign in with youtube.com cookies', 'Everything, including writing in live chat. Cookies give full access to the account.', cookiesDialog);
+    dialog('Sign in', b, [['Cancel', closeDialogs]]);
+  }
+  async function codeSignIn() {
     let timer;
-    const body = el('div'); body.appendChild(para('Sign in to get your own recommendations. You will enter a short code on google.com/device.'));
+    const body = el('div'); body.appendChild(para('Open google.com/device on any device and enter this code.'));
     const code = el('div', '', { fontSize: '30px', letterSpacing: '3px', textAlign: 'center', margin: '14px 0', fontWeight: 700, color: '#33b5e5' }); body.appendChild(code);
     const info = el('div', '', { fontSize: '13px', color: '#aaa', textAlign: 'center' }); body.appendChild(info);
-    const o = dialog('Sign in', body, [['Open google.com/device', () => window.open('https://www.google.com/device', '_blank')], ['Cancel', () => { clearInterval(timer); closeDialogs(); }]]);
+    const o = dialog('Sign in with a code', body, [['Open google.com/device', () => window.open('https://www.google.com/device', '_blank')], ['Cancel', () => { clearInterval(timer); closeDialogs(); }]]);
     try {
       const s = await API.authStart(); code.textContent = s.user_code; info.textContent = 'Waiting for confirmation…';
       timer = setInterval(async () => {
@@ -660,15 +708,15 @@
   async function cookiesDialog() {
     const cs = await API.cookieStatus();
     const body = el('div');
-    const p1 = para('Live chat needs the cookies of a signed-in youtube.com. On a computer: open youtube.com signed in, export the cookies with the "Get cookies.txt LOCALLY" extension (or copy the Cookie request header from the developer tools) and paste them here.');
+    const p1 = para('Sign in with the cookies of a signed-in youtube.com. On a computer: open youtube.com signed in, export the cookies with the "Get cookies.txt LOCALLY" extension (or copy the Cookie request header from the developer tools) and paste them here.');
     const p2 = para('Warning: cookies give full access to the Google account. They stay on this server in data/cookies.txt. Use a separate account if you can.'); p2.style.color = '#ffb74d'; p2.style.marginTop = '8px';
     const ta = el('textarea', '', { width: '100%', height: '110px', fontSize: '12px', fontFamily: 'monospace', padding: '6px', marginTop: '10px' }); ta.placeholder = cs.set ? 'Paste new cookies to replace the saved ones' : 'Paste cookies here';
     const info = el('div', '', { fontSize: '13px', color: '#aaa', marginTop: '6px' }); info.textContent = cs.set ? (cs.ok ? 'Saved: ' + cs.name : 'Saved cookies do not work: ' + (cs.error || '')) : 'No cookies saved';
     body.append(p1, p2, ta, info);
-    const buttons = [['Save', async () => { if (!ta.value.trim()) return; info.textContent = 'Checking…'; try { const r = await API.setCookies(ta.value); closeDialogs(); toast('Cookies saved: ' + r.name); go('settings', {}, true); } catch (e) { info.textContent = e.message; } }]];
+    const buttons = [['Save', async () => { if (!ta.value.trim()) return; info.textContent = 'Checking…'; try { const r = await API.setCookies(ta.value); closeDialogs(); toast('Signed in as ' + r.name); go('home', {}, true); } catch (e) { info.textContent = e.message; } }]];
     if (cs.set) buttons.push(['Remove', async () => { await API.clearCookies(); closeDialogs(); toast('Cookies removed'); go('settings', {}, true); }]);
     buttons.push(['Cancel', closeDialogs]);
-    dialog('YouTube cookies', body, buttons);
+    dialog('Sign in with cookies', body, buttons);
   }
 
   routes.settings = async () => {
@@ -690,9 +738,7 @@
     for (const c of doc.documentElement.children) {
       list.appendChild(cat(A(c, 'title')));
       if (A(c, 'title') === '@string/pref_general_category') {
-        list.appendChild(row('Google account', st.signedIn ? ((st.profile && st.profile.name) || 'Signed in') : 'Sign in to get your recommendations', accountDialog));
-        const cs = await API.cookieStatus();
-        list.appendChild(row('YouTube cookies', cs.set ? (cs.ok ? 'Live chat as ' + cs.name : 'Not working: ' + (cs.error || 'sign in again')) : 'Needed to write in live chat', cookiesDialog));
+        list.appendChild(row('Google account', st.signedIn ? ((st.profile && st.profile.name) || 'Signed in') + (st.method === 'cookies' ? ' (cookies)' : ' (code)') : 'Sign in with a code or with youtube.com cookies', accountDialog));
       }
       for (const p of c.children) {
         const key = A(p, 'key'); if (key === 'upload_policy') continue;   // uploading is not part of this port

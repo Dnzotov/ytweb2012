@@ -46,17 +46,24 @@ http.createServer((req, res) => {
   }
   if (u.pathname === '/api/comments' && u.searchParams.get('t')) return json(() => yt.comments(u.searchParams.get('t')));
   let m;
-  if (u.pathname === '/api/auth/status') return json(async () => ({ signedIn: auth.signedIn(), profile: auth.signedIn() ? await yt.account() : null }));
+  if (u.pathname === '/api/auth/status') return json(async () => { const m = await yt.me().catch(() => null); return { signedIn: !!m, method: m && m.method, profile: m }; });
+  const CID = /^UC[\w-]{22}$/;
+  if (u.pathname === '/api/channel' && CID.test(u.searchParams.get('cid'))) return json(() => yt.channel(u.searchParams.get('cid')));
+  if (u.pathname === '/api/channel/tab' && CID.test(u.searchParams.get('cid'))) return json(() => yt.channelTab(u.searchParams.get('cid'), u.searchParams.get('tab'), u.searchParams.get('c')));
+  if (u.pathname === '/api/channel/find' && u.searchParams.get('name')) return json(() => yt.findChannel(u.searchParams.get('name').slice(0, 100)));
+  if (u.pathname === '/api/playlist' && /^[\w-]{2,64}$/.test(u.searchParams.get('pid') || '')) return json(() => yt.playlist(u.searchParams.get('pid'), u.searchParams.get('c')));
+  if (u.pathname === '/api/me/liked') return json(() => yt.liked(u.searchParams.get('c')));
+  if (u.pathname === '/api/me/subscriptions') return json(() => yt.subscriptions(u.searchParams.get('c')));
   if (u.pathname === '/api/cookies' && req.method === 'GET') return json(() => cookieAuth.status());
-  if (u.pathname === '/api/cookies' && req.method === 'DELETE') return json(async () => { cookieAuth.clear(); return { ok: true }; });
+  if (u.pathname === '/api/cookies' && req.method === 'DELETE') return json(async () => { cookieAuth.clear(); yt.forgetMe(); return { ok: true }; });
   if (u.pathname === '/api/cookies' && req.method === 'POST') {
     let b = ''; req.on('data', d => { b += d; if (b.length > 200000) req.destroy(); });
-    req.on('end', async () => { try { const name = await cookieAuth.set(JSON.parse(b).cookies || ''); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, name })); } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); } });
+    req.on('end', async () => { try { const name = await cookieAuth.set(JSON.parse(b).cookies || ''); yt.forgetMe(); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, name })); } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); } });
     return;
   }
   if (u.pathname === '/api/auth/start' && req.method === 'POST') return json(() => auth.start());
-  if (u.pathname === '/api/auth/poll') return json(() => auth.poll());
-  if (u.pathname === '/api/auth/logout' && req.method === 'POST') return json(async () => { await auth.logout(); return { ok: true }; });
+  if (u.pathname === '/api/auth/poll') return json(async () => { const r = await auth.poll(); if (r.status === 'ok') yt.forgetMe(); return r; });
+  if (u.pathname === '/api/auth/logout' && req.method === 'POST') return json(async () => { await auth.logout(); cookieAuth.clear(); yt.forgetMe(); return { ok: true }; });
   if (u.pathname === '/api/home') return json(async () => {
     const c = u.searchParams.get('c'), kind = u.searchParams.get('k');
     if (kind !== 'search') {
@@ -75,6 +82,7 @@ http.createServer((req, res) => {
   if ((m = /^\/qhls\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.qualityMaster(m[1], hq, aq, res);
   if (u.pathname === '/api/qualities' && ID.test(u.searchParams.get('id'))) return json(() => u.searchParams.get('live') === '1' ? yt.liveQualities(u.searchParams.get('id')) : yt.qualities(u.searchParams.get('id')));
   if (u.pathname === '/hlsp' && u.searchParams.get('u')) return yt.hlsProxy(u.searchParams.get('u'), req, res);
+  if (u.pathname === '/avatar' && u.searchParams.get('u')) return yt.avatar(u.searchParams.get('u'), res);
   if ((m = /^\/thumb\/([\w-]{11})$/.exec(u.pathname))) return yt.thumb(m[1], res);
   let p = decodeURIComponent(req.url.split('?')[0]);
   if (p === '/') p = '/index.html';

@@ -35,8 +35,9 @@ const text = t => !t ? '' : t.simpleText ?? (t.runs ? t.runs.map(r => r.text).jo
 const num = s => { const m = /([\d,.]+)\s*([KMB])?/i.exec(String(s || '').replace(/,/g, '')); if (!m) return 0; const mul = { K: 1e3, M: 1e6, B: 1e9 }[(m[2] || '').toUpperCase()] || 1; return Math.round(parseFloat(m[1]) * mul); };
 const secs = s => String(s || '').split(':').reduce((a, p) => a * 60 + (+p || 0), 0);
 
+const ownerId = v => ((walk(v.ownerText || v.longBylineText || v.shortBylineText, 'browseEndpoint')[0]) || {}).browseId;
 const fromVideoRenderer = v => ({
-  id: v.videoId, title: text(v.title), author: text(v.ownerText || v.longBylineText || v.shortBylineText),
+  id: v.videoId, title: text(v.title), author: text(v.ownerText || v.longBylineText || v.shortBylineText), cid: ownerId(v),
   views: num(text(v.viewCountText)), date: text(v.publishedTimeText), dur: secs(text(v.lengthText)), live: !v.lengthText,
 });
 function fromLockup(l) {
@@ -45,7 +46,7 @@ function fromLockup(l) {
   const rows = (md.metadata && md.metadata.contentMetadataViewModel && md.metadata.contentMetadataViewModel.metadataRows) || [];
   const parts = rows.flatMap(r => (r.metadataParts || []).map(p => p.text && p.text.content)).filter(Boolean);
   const badge = walk(l.contentImage, 'text').find(t => /^\d+:\d\d/.test(t)) || '';
-  return { id: l.contentId, title: md.title.content, author: parts[0] || '', views: num(parts.find(p => /view/.test(p))), date: parts.find(p => /ago/.test(p)) || '', dur: secs(badge) };
+  return { id: l.contentId, title: md.title.content, author: parts.find(p => !/\bviews?\b|\bago\b|watching|^\d[\d.,]*\s*[KMB]?$/i.test(p)) || '', views: num(parts.find(p => /view/.test(p))), date: parts.find(p => /ago/.test(p)) || '', dur: secs(badge) };
 }
 
 // Every list returns { items, next }: `next` is an InnerTube continuation token for the following page (null at the end).
@@ -204,6 +205,11 @@ function fromTile(t) {
   return { id: t.contentId, title: text(m.title), author: lines[0] || '', views: views ? num(views[1]) : 0, date: (lines.join(' ').match(/(\d+\s+\w+\s+ago|Streamed.*|Premiered.*)/) || [''])[0], dur: secs(text(dur)), live: !!(walk(t.header, 'thumbnailOverlayTimeStatusRenderer')[0] || {}).style && /LIVE/.test((walk(t.header, 'thumbnailOverlayTimeStatusRenderer')[0] || {}).style) };
 }
 async function home(cont) {
+  if (cookieAuth.has()) {
+    const r = await cookieAuth.post('browse', cont ? { continuation: cont } : { browseId: 'FEwhat_to_watch' });
+    const items = walk(r, 'videoRenderer').map(fromVideoRenderer).concat(walk(r, 'lockupViewModel').map(fromLockup)).filter(v => v && v.id);
+    if (items.length || cont) return { items, next: walk(r, 'continuationCommand').map(c => c.token).pop() || null };
+  }
   const tok = await auth.token(); if (!tok) return null;
   const r = await post('browse', cont ? { continuation: cont } : { browseId: 'FEwhat_to_watch' }, 'TV', tok);
   const items = walk(r, 'tileRenderer').filter(t => t.contentType === 'TILE_CONTENT_TYPE_VIDEO').map(fromTile).filter(Boolean);
@@ -294,6 +300,11 @@ async function postAuthed(endpoint, body) {
   throw new Error('YouTube: ' + ((last && last.error && last.error.message) || 'refused the request'));
 }
 async function addComment(id, textMsg) {
+  if (cookieAuth.has()) {
+    const r = await cookieAuth.post('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
+    if (!ok(r)) throw new Error('YouTube: ' + ((r.error && r.error.message) || 'refused the comment'));
+    return { author: cookieAuth.name() || 'You', text: textMsg, time: 'just now' };
+  }
   await postAuthed('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
   const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg, time: 'just now' };
 }
@@ -436,4 +447,95 @@ async function sendChatCookies(id, textMsg) {
   return { author: cookieAuth.name() || 'You', text: textMsg };
 }
 
-module.exports = { dvrMaster, dvrMedia, dvrSegment, chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };
+// ---- channels and the signed-in user's own channel ----
+const CH_TABS = { videos: 'EgZ2aWRlb3PyBgQKAjoA', live: 'EgdzdHJlYW1z8gYECgJ6AA%3D%3D', playlists: 'EglwbGF5bGlzdHPyBgQKAkIA' };
+const firstUrl = o => (JSON.stringify(o || {}).match(/"url":"(https:\/\/yt3\.[^"]+)"/) || [])[1] || '';
+function fromPlaylistLockup(l) {
+  if (!l.contentId || !/PLAYLIST|PODCAST/.test(l.contentType || '')) return null;
+  const md = l.metadata && l.metadata.lockupMetadataViewModel; const count = walk(l.contentImage, 'text').find(t => /video|episode/i.test(t)) || '';
+  return { pid: l.contentId, title: md ? md.title.content : '', count };
+}
+async function channelHeader(cid) {
+  const c = await post('browse', { browseId: cid }, 'WEB');
+  const hv = walk(c, 'pageHeaderViewModel')[0], md = (c.metadata || {}).channelMetadataRenderer || {};
+  const rows = walk(hv, 'metadataRows').flat().map(r => (r.metadataParts || []).map(p => p.text && p.text.content).filter(Boolean)).flat();
+  const subs = rows.find(x => /subscriber/i.test(x)) || '', vids = rows.find(x => /video/i.test(x)) || '';
+  return { cid, title: md.title || (walk(c, 'pageHeaderRenderer')[0] || {}).pageTitle || '', handle: rows.find(x => /^@/.test(x)) || '', avatar: firstUrl(walk(hv, 'avatarViewModel')[0] || md.avatar),
+    subscribers: num(subs), subscribersText: subs, videos: num(vids), videosText: vids, desc: md.description || '' };
+}
+async function channelTab(cid, tab, cont) {
+  const r = await post('browse', cont ? { continuation: cont } : { browseId: cid, params: CH_TABS[tab] || CH_TABS.videos }, 'WEB');
+  const next = walk(r, 'continuationCommand').map(c => c.token).pop() || null;
+  if (tab === 'playlists') return { items: walk(r, 'lockupViewModel').map(fromPlaylistLockup).filter(Boolean), next };
+  const items = walk(r, 'lockupViewModel').map(fromLockup).concat(walk(r, 'videoRenderer').map(fromVideoRenderer)).filter(Boolean).map(v => ({ ...v, cid: v.cid || cid }));
+  return { items, next };
+}
+async function channel(cid) { return channelHeader(cid); }
+async function findChannel(name) {
+  const r = await post('search', { query: name, params: 'EgIQAg%3D%3D' }, 'WEB');
+  const c = walk(r, 'channelRenderer')[0]; return c ? { cid: c.channelId } : null;
+}
+async function playlist(pid, cont) {
+  const r = await post('browse', cont ? { continuation: cont } : { browseId: 'VL' + pid }, 'WEB');
+  const items = walk(r, 'playlistVideoRenderer').map(v => ({ id: v.videoId, title: text(v.title), author: text(v.shortBylineText), cid: ownerId({ shortBylineText: v.shortBylineText }), dur: +v.lengthSeconds || secs(text(v.lengthText)), views: 0, date: text(v.videoInfo) }))
+    .concat(walk(r, 'lockupViewModel').map(fromLockup)).filter(v => v && v.id);
+  const title = text((walk(r, 'playlistHeaderRenderer')[0] || {}).title) || ((walk(r, 'pageHeaderRenderer')[0] || {}).pageTitle) || '';
+  return { title, items, next: walk(r, 'continuationCommand').map(c => c.token).pop() || null };
+}
+// Who is signed in. Cookies (youtube.com) are preferred, then the TV sign-in.
+let meCache = null;
+async function me() {
+  if (meCache && meCache.exp > Date.now()) return meCache.v;
+  let v = null;
+  if (cookieAuth.has()) {
+    try {
+      const r = await cookieAuth.post('account/account_menu', {});
+      const hdr = walk(r, 'activeAccountHeaderRenderer')[0] || {};
+      const cid = (JSON.stringify(r).match(/"browseId":"(UC[\w-]{22})"/) || [])[1];
+      v = { method: 'cookies', name: text(hdr.accountName) || cookieAuth.name() || '', handle: text(hdr.channelHandle), avatar: firstUrl(hdr.accountPhoto), cid };
+    } catch (e) {}
+  }
+  if (!v && auth.signedIn()) {
+    const tok = await auth.token();
+    if (tok) {
+      const r = await post('account/accounts_list', {}, 'TV', tok);
+      const it = walk(r, 'accountItem').find(a => a.isSelected) || walk(r, 'accountItem')[0] || {};
+      const s = JSON.stringify(it);
+      let cid = (s.match(/"browseId":"(UC[\w-]{22})"/) || [])[1];
+      const handle = text(it.channelHandle) || (s.match(/"(@[\w.-]{3,})"/) || [])[1] || '';
+      if (!cid && handle) { try { const rr = await post('navigation/resolve_url', { url: 'https://www.youtube.com/' + handle }, 'WEB'); cid = (walk(rr, 'browseEndpoint')[0] || {}).browseId; } catch (e) {} }
+      v = { method: 'tv', name: text(it.accountName) || (auth.profile() || {}).name || 'Google account', handle, avatar: firstUrl(it.accountPhoto) || (auth.profile() || {}).photo || '', cid };
+    }
+  }
+  meCache = { v, exp: Date.now() + 10 * 60 * 1000 }; return v;
+}
+const forgetMe = () => { meCache = null; };
+// liked videos ("LL") and subscriptions need the account
+async function liked(cont) {
+  const body = cont ? { continuation: cont } : { browseId: 'VLLL' };
+  let r;
+  if (cookieAuth.has()) r = await cookieAuth.post('browse', body);
+  else { const tok = await auth.token(); if (!tok) return { items: [], next: null }; r = await post('browse', body, 'TV', tok); }
+  const items = walk(r, 'playlistVideoRenderer').map(v => ({ id: v.videoId, title: text(v.title), author: text(v.shortBylineText), dur: +v.lengthSeconds || 0, views: 0, date: '' }))
+    .concat(walk(r, 'tileRenderer').filter(t => t.contentType === 'TILE_CONTENT_TYPE_VIDEO').map(fromTile)).filter(v => v && v.id);
+  return { items, next: walk(r, 'continuationCommand').map(c => c.token).concat(walk(r, 'nextContinuationData').map(c => c.continuation)).pop() || null };
+}
+async function subscriptions(cont) {
+  let r;
+  if (cookieAuth.has()) r = await cookieAuth.post('browse', cont ? { continuation: cont } : { browseId: 'FEchannels' });
+  else { const tok = await auth.token(); if (!tok) return { items: [], next: null }; r = await post('browse', cont ? { continuation: cont } : { browseId: 'FEchannels' }, 'TV', tok); }
+  const items = walk(r, 'channelRenderer').map(c => ({ cid: c.channelId, title: text(c.title), avatar: firstUrl(c.thumbnail) }))
+    .concat(walk(r, 'tileRenderer').filter(t => /CHANNEL/.test(t.contentType || '')).map(t => ({ cid: t.contentId, title: text(t.metadata && t.metadata.tileMetadataRenderer && t.metadata.tileMetadataRenderer.title), avatar: firstUrl(t.header) })))
+    .filter(c => c.cid && c.title);
+  return { items, next: walk(r, 'continuationCommand').map(c => c.token).concat(walk(r, 'nextContinuationData').map(c => c.continuation)).pop() || null };
+}
+
+// avatars: yt3 refuses requests with a foreign Referer (429), so they go through the server
+function avatar(token, res) {
+  let u; try { u = new URL(Buffer.from(token, 'base64url').toString()); } catch (e) { res.writeHead(400); return res.end(); }
+  if (u.protocol !== 'https:' || !/^yt3\.(ggpht|googleusercontent)\.com$/.test(u.hostname)) { res.writeHead(403); return res.end(); }
+  https.get(u, { headers: { 'user-agent': CLIENTS.WEB.ua }, timeout: 15000 }, r => { res.writeHead(r.statusCode, { 'content-type': r.headers['content-type'] || 'image/jpeg', 'cache-control': 'public, max-age=86400' }); r.pipe(res); })
+    .on('error', () => { res.writeHead(502); res.end(); });
+}
+
+module.exports = { avatar, channel, channelTab, findChannel, playlist, me, forgetMe, liked, subscriptions, dvrMaster, dvrMedia, dvrSegment, chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };
