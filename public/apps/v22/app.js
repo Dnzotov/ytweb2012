@@ -336,13 +336,14 @@
     // a picked audio track is only available through HLS, so 360p then also goes through HLS
     if (v.demo || (!v.live && q === 360 && !P.__audio)) { P.__mode = 'mp4'; vid.src = v.src; return; }
     const qs = [q !== 'auto' ? 'h=' + q : '', P.__audio ? 'a=' + encodeURIComponent(P.__audio) : ''].filter(Boolean).join('&');
-    const url = (v.live ? '/hls/' : '/qhls/') + v.id + '.m3u8' + (qs ? '?' + qs : '');
-    const fallback = () => { if (P.__hls) { P.__hls.destroy(); P.__hls = null; } if (v.live) return onFail('Live stream unavailable'); onFail('This quality is not available, playing 360p'); P.__setQ && P.__setQ(360, true); };
+    // live: /ldvr = our DVR playlist (rewind up to 2 h); if it fails, YouTube's own 30-second live playlist (/hls)
+    const url = (v.live ? (P.__liveFallback ? '/hls/' : '/ldvr/') : '/qhls/') + v.id + '.m3u8' + (qs ? '?' + qs : '');
+    const fallback = () => { if (P.__hls) { P.__hls.destroy(); P.__hls = null; } if (v.live && !P.__liveFallback) { P.__liveFallback = true; return attachSource(P, vid, v, q, onFail); } if (v.live) return onFail('Live stream unavailable'); onFail('This quality is not available, playing 360p'); P.__setQ && P.__setQ(360, true); };
     const native = () => { P.__mode = 'native'; vid.src = url; vid.addEventListener('error', fallback, { once: true }); };
     if (isApple && vid.canPlayType('application/vnd.apple.mpegurl')) return native();
     try { await loadHls(); } catch (e) {}
     if (window.Hls && Hls.isSupported()) {
-      const h = new Hls({ lowLatencyMode: !!v.live, capLevelToPlayerSize: false, maxBufferLength: 30 }); P.__hls = h; P.__mode = 'hls';
+      const h = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, capLevelToPlayerSize: false, maxBufferLength: 30 }); P.__hls = h; P.__mode = 'hls';
       h.on(Hls.Events.ERROR, (e, d) => { if (!d.fatal) return; if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !h.__recovered) { h.__recovered = true; h.recoverMediaError(); } else fallback(); });
       h.loadSource(url); h.attachMedia(vid); return;
     }
@@ -373,7 +374,15 @@
     const ttot = el('div', '', { position: 'absolute', right: '94px', bottom: '8px', fontSize: '12px', color: '#fff' }); ttot.textContent = fmtTime(v.dur); hud.appendChild(ttot);
     const fs = el('div', '', { position: 'absolute', right: '8px', bottom: '8px', width: '32px', height: '33px', background: `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreenoff.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(fs);
     const hq = el('div', '', { position: 'absolute', right: '6px', top: '4px', width: '47px', height: '40px', background: `url(apps/v22/res/drawable-hdpi-v4/btn_hq_off.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(hq);
-    if (v.live) { bar.style.display = 'none'; tcur.style.display = 'none'; ttot.style.display = 'none'; const lv = el('div', '', { position: 'absolute', left: '8px', bottom: '10px', fontSize: '12px', fontWeight: 700, color: '#fff', background: '#cc0000', padding: '1px 6px', borderRadius: '2px' }); lv.textContent = 'LIVE'; hud.appendChild(lv); }
+    // Live: the bar covers the rewind window; the time shows how far behind live you are; tapping LIVE jumps to the live edge.
+    let liveBadge = null;
+    if (v.live) {
+      ttot.style.display = 'none'; tcur.style.display = 'none'; bar.style.left = '56px';
+      liveBadge = el('div', '', { position: 'absolute', left: '6px', bottom: '9px', fontSize: '12px', fontWeight: 700, color: '#fff', background: '#cc0000', padding: '2px 6px', borderRadius: '2px', cursor: 'pointer' });
+      liveBadge.textContent = 'LIVE'; hud.appendChild(liveBadge);
+      liveBadge.addEventListener('click', e => { e.stopPropagation(); const r = rng(); vid.currentTime = (P.__hls && P.__hls.liveSyncPosition) || Math.max(r[0], r[1] - 12); vid.play().catch(() => {}); show(); });
+      const behindT = el('div', '', { position: 'absolute', right: '94px', bottom: '8px', fontSize: '12px', color: '#fff' }); hud.appendChild(behindT); P.__behind = behindT;
+    }
     // ---- quality: button at the bottom (painted with the app's own button_background drawable) + list dialog ----
     const qBtn = el('div', '', { position: 'absolute', right: '44px', bottom: '7px', minWidth: '44px', height: '26px', padding: '0 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700, color: '#fff', cursor: 'pointer', isolation: 'isolate' });
     const qBg = el('div'); const qLabel = el('span'); qBtn.append(qBg, qLabel); hud.appendChild(qBtn);
@@ -456,18 +465,26 @@
     vid.addEventListener('ended', () => { setGlyph(false); show(); });
     const paintF = f => { prog.style.width = f * 100 + '%'; knob.style.left = f * 100 + '%'; };
     let drag = false, dragF = 0;
-    vid.addEventListener('timeupdate', () => { if (!drag) paintF(vid.currentTime / (vid.duration || v.dur || 1)); tcur.textContent = fmtTime(vid.currentTime); });
+    vid.addEventListener('timeupdate', () => {
+      const r = rng(), f = r[1] > r[0] ? (vid.currentTime - r[0]) / (r[1] - r[0]) : 1;
+      if (!drag) paintF(Math.min(1, Math.max(0, f)));
+      tcur.textContent = fmtTime(vid.currentTime);
+      if (liveBadge) { const live = atLive(); liveBadge.style.background = live ? '#cc0000' : '#555'; P.__behind.textContent = live ? '' : '-' + fmtTime(r[1] - vid.currentTime); }
+    });
     vid.addEventListener('loadedmetadata', () => { ttot.textContent = fmtTime(vid.duration); });
     // Scrubbing: the knob follows the finger, a bubble above it shows the target time, the seek happens on release.
     const bubble = el('div', '', { position: 'absolute', bottom: '56px', transform: 'translateX(-50%)', background: 'rgba(0,0,0,.85)', color: '#fff', fontSize: '13px', fontWeight: 700, padding: '3px 8px', borderRadius: '3px', border: '1px solid #666', display: 'none', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 3 });
     bar.appendChild(bubble);
     const durNow = () => vid.duration && isFinite(vid.duration) ? vid.duration : (v.dur || 1);
+    // [start, end] of what can be played: the whole video, or the rewind window of a live stream
+    const rng = () => { if (v.live) { const s = vid.seekable; if (s && s.length) return [s.start(0), s.end(s.length - 1)]; return [0, Math.max(1, vid.currentTime)]; } return [0, durNow()]; };
+    const atLive = () => { const r = rng(); return r[1] - vid.currentTime < 25; };
     const fAt = e => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
-    const showBubble = f => { bubble.style.display = 'block'; bubble.style.left = f * 100 + '%'; bubble.textContent = fmtTime(f * durNow()); };
+    const showBubble = f => { const r = rng(); bubble.style.display = 'block'; bubble.style.left = f * 100 + '%'; const t = r[0] + f * (r[1] - r[0]); bubble.textContent = v.live ? (r[1] - t < 25 ? 'LIVE' : '-' + fmtTime(r[1] - t)) : fmtTime(t); };
     bar.style.touchAction = 'none';
     bar.addEventListener('pointerdown', e => { e.stopPropagation(); drag = true; bar.setPointerCapture(e.pointerId); dragF = fAt(e); paintF(dragF); showBubble(dragF); clearTimeout(hideT); hud.style.opacity = 1; });
     bar.addEventListener('pointermove', e => { if (drag) { dragF = fAt(e); paintF(dragF); showBubble(dragF); } else if (e.pointerType === 'mouse') showBubble(fAt(e)); });
-    const endDrag = () => { if (!drag) return; drag = false; bubble.style.display = 'none'; vid.currentTime = dragF * durNow(); show(); };
+    const endDrag = () => { if (!drag) return; drag = false; bubble.style.display = 'none'; const r = rng(); vid.currentTime = r[0] + dragF * (r[1] - r[0]); show(); };
     bar.addEventListener('pointerup', endDrag); bar.addEventListener('pointercancel', endDrag);
     bar.addEventListener('pointerleave', () => { if (!drag) bubble.style.display = 'none'; });
     bar.addEventListener('click', e => e.stopPropagation());

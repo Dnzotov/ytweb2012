@@ -73,7 +73,7 @@ async function video(id) {
     id, title: vd.title || text(prim.title), author: vd.author || text(owner.title), channelId: vd.channelId || (owner.navigationEndpoint && owner.navigationEndpoint.browseEndpoint && owner.navigationEndpoint.browseEndpoint.browseId),
     views: num(vd.viewCount) || num(text(prim.viewCount && prim.viewCount.videoViewCountRenderer && prim.viewCount.videoViewCountRenderer.viewCount)), dur: +vd.lengthSeconds || 0,
     date: text(prim.dateText) || '', desc: vd.shortDescription || text(sec.attributedDescription) || '', tags: (vd.keywords || []).join(', '), likes, dislikes: 0,
-    live: !!vd.isLive || !!vd.isLiveContent && !vd.lengthSeconds, category: '', playable: !!(pl.playabilityStatus && pl.playabilityStatus.status === 'OK'), reason: pl.playabilityStatus && pl.playabilityStatus.reason || '', related, relatedNext, commentsToken: token || null, chat: chat && chat.token ? chat : null,
+    live: !!vd.isLive || !!(pl.streamingData && pl.streamingData.hlsManifestUrl) || !!vd.isLiveContent && !vd.lengthSeconds, category: '', playable: !!(pl.playabilityStatus && pl.playabilityStatus.status === 'OK'), reason: pl.playabilityStatus && pl.playabilityStatus.reason || '', related, relatedNext, commentsToken: token || null, chat: chat && chat.token ? chat : null,
   };
 }
 
@@ -288,6 +288,7 @@ const ok = r => r && !r.error && (r.actionResult ? r.actionResult.status === 'ST
 async function postAuthed(endpoint, body) {
   const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to post'); e.code = 401; throw e; }
   let last;
+  if (process.env.YTWEB_DEBUG) console.log('[post]', endpoint);
   for (const c of ['TV', 'WEB']) {   // the TV client accepts the OAuth token (WEB answers 400 to it)
     try { const r = await post(endpoint, body, c, tok); if (ok(r)) return r; last = r; } catch (e) { last = { error: { message: e.message } }; }
   }
@@ -299,12 +300,86 @@ async function addComment(id, textMsg) {
 }
 async function sendChat(id, textMsg) {
   const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to chat'); e.code = 401; throw e; }
-  // the "send" params only come with a signed-in watch page
-  let params = null;
-  for (const c of ['TV', 'WEB']) { try { const nx = await post('next', { videoId: id }, c, tok); params = (walk(nx, 'sendLiveChatMessageEndpoint')[0] || {}).params; if (params) break; } catch (e) {} }
-  if (!params) throw new Error('Chat is not available for this account');
+  // Only the TV client accepts our OAuth token, and the TV app has no chat box, so YouTube never hands us the
+  // "send" params. They are a small protobuf { 1: { 5: { 1: channelId, 2: videoId } }, 2: 2, 3: 4 }, built here.
+  const pl = await post('player', { videoId: id, contentCheckOk: true, racyCheckOk: true }, 'ANDROID');
+  const ch = pl.videoDetails && pl.videoDetails.channelId; if (!ch) throw new Error('channel not found');
+  const fld = (n, b) => Buffer.concat([Buffer.from([(n << 3) | 2, b.length]), b]);
+  const inner = Buffer.concat([fld(1, Buffer.from(ch)), fld(2, Buffer.from(id))]);
+  const params = Buffer.concat([fld(1, fld(5, inner)), Buffer.from([0x10, 0x02, 0x18, 0x04])]).toString('base64');
   await postAuthed('live_chat/send_message', { params, richMessage: { textSegments: [{ text: textMsg }] } });
   const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg };
 }
 
-module.exports = { chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };
+// ---- live DVR: rewind inside a stream and jump back to live ----
+// YouTube's live HLS manifest only covers the last 30 s. The DASH (adaptive) URLs of a live stream accept &sq=N for any
+// 5-second segment in the DVR window (up to 12 h), and each segment is a complete fMP4 file (ftyp+moov+moof+mdat).
+// We describe them as an HLS playlist: one init segment (ftyp+moov) and media segments with the init part cut off.
+const DVR_WINDOW = Math.max(60, +process.env.DVR_SEGMENTS || 1440);   // 1440 x 5 s = 2 h of rewind
+const dvrCache = new Map();   // id -> { exp, fmts: {itag: fmt}, video: [fmt], audio: fmt, head, headAt, target }
+async function dvrInfo(id) {
+  const c = dvrCache.get(id); if (c && c.exp > Date.now()) return c;
+  const pl = await post('player', { videoId: id, contentCheckOk: true, racyCheckOk: true }, 'ANDROID');
+  const ad = ((pl.streamingData || {}).adaptiveFormats || []).filter(f => f.url);
+  if (!((pl.videoDetails && pl.videoDetails.isLive) || (pl.streamingData && pl.streamingData.hlsManifestUrl)) || !ad.length) throw new Error('not a live stream with DVR');
+  const video = ad.filter(f => /^video\/mp4/.test(f.mimeType) && /avc1/.test(f.mimeType)).sort((a, b) => a.height - b.height);
+  const audio = ad.find(f => f.itag === 140) || ad.find(f => /^audio\/mp4/.test(f.mimeType));
+  if (!video.length || !audio) throw new Error('no H.264 live formats');
+  const fmts = {}; [...video, audio].forEach(f => fmts[f.itag] = f);
+  const info = { exp: Date.now() + 60 * 60 * 1000, fmts, video, audio, head: 0, headAt: 0, target: (video[0].targetDurationSec || 5), init: {} };
+  dvrCache.set(id, info); return info;
+}
+function headSeq(info) {
+  if (Date.now() - info.headAt < 2000) return Promise.resolve(info.head);
+  const u = new URL(info.audio.url + '&sq=0');
+  return new Promise((ok, no) => {
+    const r = https.request({ host: u.host, path: u.pathname + u.search, method: 'HEAD', headers: { 'user-agent': CLIENTS.ANDROID.ua }, timeout: 10000 }, res => {
+      res.resume(); const h = +res.headers['x-head-seqnum'];
+      if (!h) return no(new Error('no head sequence (' + res.statusCode + ')'));
+      info.head = h; info.headAt = Date.now(); ok(h);
+    });
+    r.on('error', no); r.on('timeout', () => r.destroy(new Error('timeout'))); r.end();
+  });
+}
+function fetchBuf(url) {
+  return new Promise((ok, no) => https.get(url, { headers: { 'user-agent': CLIENTS.ANDROID.ua }, timeout: 20000 }, r => {
+    if (r.statusCode >= 300 && r.statusCode < 400 && r.headers.location) { r.resume(); return fetchBuf(new URL(r.headers.location, url).href).then(ok, no); }
+    const b = []; r.on('data', d => b.push(d)); r.on('end', () => r.statusCode < 300 ? ok(Buffer.concat(b)) : no(new Error('segment ' + r.statusCode)));
+  }).on('error', no));
+}
+// offset of the first box after ftyp/moov (where the media part starts)
+function mediaStart(buf) { let p = 0; while (p + 8 <= buf.length) { const size = buf.readUInt32BE(p), type = buf.toString('latin1', p + 4, p + 8); if (type !== 'ftyp' && type !== 'moov') return p; if (size < 8) break; p += size; } return 0; }
+const mpeg = 'application/vnd.apple.mpegurl';
+async function dvrMaster(id, h, res) {
+  try {
+    const d = await dvrInfo(id); await headSeq(d);
+    let vids = d.video; if (h) { const hs = vids.map(f => f.height); const pick = hs.includes(h) ? h : (hs.filter(x => x <= h).pop() || hs[0]); vids = vids.filter(f => f.height === pick); }
+    const cod = f => (/codecs="([^"]+)"/.exec(f.mimeType) || [])[1];
+    const out = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-INDEPENDENT-SEGMENTS', `#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Audio",DEFAULT=YES,AUTOSELECT=YES,URI="/ldvr/${id}/${d.audio.itag}.m3u8"`];
+    for (const f of vids) out.push(`#EXT-X-STREAM-INF:BANDWIDTH=${(f.bitrate || 1e6) + (d.audio.bitrate || 128000)},RESOLUTION=${f.width}x${f.height},CODECS="${cod(f)},${cod(d.audio)}",AUDIO="a"`, `/ldvr/${id}/${f.itag}.m3u8`);
+    res.writeHead(200, { 'content-type': mpeg, 'cache-control': 'no-store' }); res.end(out.join('\n') + '\n');
+  } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
+}
+async function dvrMedia(id, itag, res) {
+  try {
+    const d = await dvrInfo(id); if (!d.fmts[itag]) { res.writeHead(404); return res.end(); }
+    const head = await headSeq(d), first = Math.max(0, head - DVR_WINDOW + 1), T = d.target;
+    const out = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${T}`, `#EXT-X-MEDIA-SEQUENCE:${first}`, '#EXT-X-INDEPENDENT-SEGMENTS', `#EXT-X-MAP:URI="/lseg/${id}/${itag}/init"`];
+    // the newest segment may still be growing, so the list ends one before the head
+    for (let sq = first; sq < head; sq++) out.push(`#EXTINF:${T}.0,`, `/lseg/${id}/${itag}/${sq}`);
+    res.writeHead(200, { 'content-type': mpeg, 'cache-control': 'no-store' }); res.end(out.join('\n') + '\n');
+  } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
+}
+async function dvrSegment(id, itag, sq, res) {
+  try {
+    const d = await dvrInfo(id); const f = d.fmts[itag]; if (!f) { res.writeHead(404); return res.end(); }
+    if (sq === 'init') {
+      if (!d.init[itag]) { const head = await headSeq(d); const b = await fetchBuf(f.url + '&sq=' + Math.max(0, head - 1)); d.init[itag] = b.subarray(0, mediaStart(b)); }
+      res.writeHead(200, { 'content-type': 'video/mp4', 'cache-control': 'max-age=3600' }); return res.end(d.init[itag]);
+    }
+    const b = await fetchBuf(f.url + '&sq=' + (+sq));
+    res.writeHead(200, { 'content-type': 'video/mp4', 'cache-control': 'max-age=3600' }); res.end(b.subarray(mediaStart(b)));
+  } catch (e) { if (/40[34]/.test(e.message)) dvrCache.delete(id); res.writeHead(502); res.end(String(e.message || e)); }
+}
+
+module.exports = { dvrMaster, dvrMedia, dvrSegment, chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };

@@ -20,6 +20,7 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
   (stops at a memory budget; reload the page to reset)
 - Player: original controls, seeking, fullscreen, quality (Auto, 1080p … 144p), playback speed and
   audio tracks (dubbed languages) when a video has them
+- Live streams with rewind (DVR, last 2 hours by default, `DVR_SEGMENTS` = number of 5-second segments) and a LIVE button to jump back
 - Live chat and chat replay (synced to the playhead), also as an overlay in fullscreen (not on iOS)
 - Posting comments and live chat messages after Google sign-in
 - Optional Google sign-in for your own recommendations
