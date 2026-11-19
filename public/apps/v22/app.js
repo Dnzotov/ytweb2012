@@ -576,7 +576,7 @@
       const row = el('div', '', { display: 'flex', gap: '4px', padding: '4px', borderTop: '1px solid #333', background: '#111' });
       const inp = el('input', '', { flex: '1', minWidth: '0', fontSize: '14px', padding: '7px', border: '1px solid #666', borderRadius: '3px', background: '#fff', color: '#000', fontFamily: 'inherit' }); inp.placeholder = 'Say something…'; inp.maxLength = 200;
       const send = el('div', '', { padding: '0 12px', display: 'flex', alignItems: 'center', border: '1px solid #555', borderRadius: '3px', background: 'linear-gradient(#444,#222)', color: '#fff', fontSize: '13px', cursor: 'pointer' }); send.textContent = 'Send';
-      const go_ = async () => { const t = inp.value.trim(); if (!t) return; send.textContent = '…'; try { const m = await API.sendChat(v.id, t); inp.value = ''; add([{ ...m, id: 'me' + Date.now() }]); } catch (e) { toast(e.status === 401 ? 'Sign in (Settings → Google account) to chat' : 'Message not sent: ' + e.message); } send.textContent = 'Send'; };
+      const go_ = async () => { const t = inp.value.trim(); if (!t) return; send.textContent = '…'; try { const m = await API.sendChat(v.id, t); inp.value = ''; add([{ ...m, id: 'me' + Date.now() }]); } catch (e) { toast(e.status === 401 ? e.message : 'Message not sent: ' + e.message); } send.textContent = 'Send'; };
       send.onclick = go_; inp.addEventListener('keydown', e => { if (e.key === 'Enter') go_(); });
       row.append(inp, send); box.appendChild(row);
     }
@@ -656,6 +656,21 @@
     } catch (e) { info.textContent = 'Sign-in is not available: ' + e.message; }
   }
 
+  // youtube.com cookies: the only way to send live chat messages (the TV sign-in is refused by YouTube for chat)
+  async function cookiesDialog() {
+    const cs = await API.cookieStatus();
+    const body = el('div');
+    const p1 = para('Live chat needs the cookies of a signed-in youtube.com. On a computer: open youtube.com signed in, export the cookies with the "Get cookies.txt LOCALLY" extension (or copy the Cookie request header from the developer tools) and paste them here.');
+    const p2 = para('Warning: cookies give full access to the Google account. They stay on this server in data/cookies.txt. Use a separate account if you can.'); p2.style.color = '#ffb74d'; p2.style.marginTop = '8px';
+    const ta = el('textarea', '', { width: '100%', height: '110px', fontSize: '12px', fontFamily: 'monospace', padding: '6px', marginTop: '10px' }); ta.placeholder = cs.set ? 'Paste new cookies to replace the saved ones' : 'Paste cookies here';
+    const info = el('div', '', { fontSize: '13px', color: '#aaa', marginTop: '6px' }); info.textContent = cs.set ? (cs.ok ? 'Saved: ' + cs.name : 'Saved cookies do not work: ' + (cs.error || '')) : 'No cookies saved';
+    body.append(p1, p2, ta, info);
+    const buttons = [['Save', async () => { if (!ta.value.trim()) return; info.textContent = 'Checking…'; try { const r = await API.setCookies(ta.value); closeDialogs(); toast('Cookies saved: ' + r.name); go('settings', {}, true); } catch (e) { info.textContent = e.message; } }]];
+    if (cs.set) buttons.push(['Remove', async () => { await API.clearCookies(); closeDialogs(); toast('Cookies removed'); go('settings', {}, true); }]);
+    buttons.push(['Cancel', closeDialogs]);
+    dialog('YouTube cookies', body, buttons);
+  }
+
   routes.settings = async () => {
     const root = el('div', '', { display: 'flex', flexDirection: 'column', background: '#000' });
     const hh = await V.inflate('header', null); hh.style.width = '100%'; await header(hh, { buttons: [] }); root.appendChild(hh);
@@ -674,7 +689,11 @@
     const VERSION = '2.2.14 — a port of the YouTube Android app to the browser: smartphone mode, made to work on iOS (Safari) and Android.';
     for (const c of doc.documentElement.children) {
       list.appendChild(cat(A(c, 'title')));
-      if (A(c, 'title') === '@string/pref_general_category') list.appendChild(row('Google account', st.signedIn ? ((st.profile && st.profile.name) || 'Signed in') : 'Sign in to get your recommendations', accountDialog));
+      if (A(c, 'title') === '@string/pref_general_category') {
+        list.appendChild(row('Google account', st.signedIn ? ((st.profile && st.profile.name) || 'Signed in') : 'Sign in to get your recommendations', accountDialog));
+        const cs = await API.cookieStatus();
+        list.appendChild(row('YouTube cookies', cs.set ? (cs.ok ? 'Live chat as ' + cs.name : 'Not working: ' + (cs.error || 'sign in again')) : 'Needed to write in live chat', cookiesDialog));
+      }
       for (const p of c.children) {
         const key = A(p, 'key'); if (key === 'upload_policy') continue;   // uploading is not part of this port
         const title = RT.ref(A(p, 'title')), summary = RT.ref(A(p, 'summary') || '');

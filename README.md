@@ -22,7 +22,7 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
   audio tracks (dubbed languages) when a video has them
 - Live streams with rewind back to the start (as far as YouTube keeps it, capped by `DVR_MAX_HOURS`, default 24) and a LIVE button to jump back
 - Live chat and chat replay (synced to the playhead), also as an overlay in fullscreen (not on iOS)
-- Posting comments and live chat messages after Google sign-in
+- Posting comments after Google sign-in; writing in live chat with youtube.com cookies (Settings → YouTube cookies)
 - Optional Google sign-in for your own recommendations
 - Optional access PIN
 
@@ -78,6 +78,8 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
 - **Google sign-in is shared.** The tokens are kept on the server in `data/auth.json`, so everyone
   who can open the server uses that account. Set `YT_PIN` when you sign in.
   Settings → Google account → Sign out revokes the token and deletes the file.
+- **YouTube cookies** (only needed for writing in live chat) give full access to the Google account. They are
+  kept in `data/cookies.txt`. Use a separate account. Settings → YouTube cookies → Remove deletes them.
 - Sign-in uses the OAuth "device code" flow with the public client of YouTube for TVs, as many
   open-source YouTube clients do. The client ID is in `auth.js`.
 

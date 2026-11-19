@@ -4,6 +4,7 @@
 // take the progressive MP4 (itag 18, video+audio in one file) from the ANDROID client and relay it. Nothing is stored on disk.
 const https = require('https');
 const auth = require('./auth');
+const cookieAuth = require('./cookies');
 
 const HOST = 'youtubei.googleapis.com';
 const CLIENTS = {
@@ -297,7 +298,8 @@ async function addComment(id, textMsg) {
   const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg, time: 'just now' };
 }
 async function sendChat(id, textMsg) {
-  const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to chat'); e.code = 401; throw e; }
+  if (cookieAuth.has()) return sendChatCookies(id, textMsg);
+  const tok = await auth.token(); if (!tok) { const e = new Error('Add YouTube cookies in Settings to chat'); e.code = 401; throw e; }
   // Only the TV client accepts our OAuth token, and the TV app has no chat box, so YouTube never hands us the
   // "send" params. We build them like YouTube.js (LuanRT/YouTube.js, LiveChat.sendMessage, MIT):
   // protobuf { 1: { 5: { 1: channelId, 2: videoId } }, 2: 1, 3: 4 } -> base64 -> encodeURIComponent -> base64 again.
@@ -309,6 +311,7 @@ async function sendChat(id, textMsg) {
   const cmid = require('crypto').randomUUID();
   const r = await post('live_chat/send_message', { params, clientMessageId: cmid, richMessage: { textSegments: [{ text: textMsg }] } }, 'TV', tok);
   if (process.env.YTWEB_DEBUG) console.log('[chat send]', JSON.stringify(r).slice(0, 500));
+  if (r.error && r.error.status === 'FAILED_PRECONDITION') { const e = new Error('YouTube does not let the TV sign-in chat. Add YouTube cookies in Settings.'); e.code = 401; throw e; }
   if (r.error) throw new Error('YouTube: ' + r.error.message + ' (' + (r.error.status || r.error.code) + ')');
   if (!(r.actions && r.actions.length)) throw new Error('YouTube did not accept the message');
   const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg };
@@ -401,6 +404,36 @@ async function dvrSegment(id, itag, sq, res) {
     const b = await fetchBuf(f.url + '&sq=' + (+sq));
     res.writeHead(200, { 'content-type': 'video/mp4', 'cache-control': 'max-age=3600' }); res.end(b.subarray(mediaStart(b)));
   } catch (e) { if (/40[34]/.test(e.message)) dvrCache.delete(id); res.writeHead(502); res.end(String(e.message || e)); }
+}
+
+// Sending with youtube.com cookies (WEB client). The send params come from the signed-in chat itself when possible.
+function sendParamsFor(ch, id) {
+  const fld = (n, b) => Buffer.concat([Buffer.from([(n << 3) | 2, b.length]), b]);
+  const proto = Buffer.concat([fld(1, fld(5, Buffer.concat([fld(1, Buffer.from(ch)), fld(2, Buffer.from(id))]))), Buffer.from([0x10, 0x01, 0x18, 0x04])]);
+  return Buffer.from(encodeURIComponent(proto.toString('base64'))).toString('base64');
+}
+async function sendChatCookies(id, textMsg) {
+  let params = null;
+  try {
+    const nx = await cookieAuth.post('next', { videoId: id });
+    const lc = walk(nx, 'liveChatRenderer')[0]; const ct = lc && walk(lc.continuations, 'continuation')[0];
+    if (ct) {
+      const lr = await cookieAuth.post('live_chat/get_live_chat', { continuation: ct });
+      params = (walk(lr, 'sendLiveChatMessageEndpoint')[0] || {}).params || null;
+      const restricted = walk(lr, 'liveChatRestrictedParticipationRenderer')[0];
+      if (!params && restricted) throw new Error(text(restricted.message) || 'Chat is restricted for this account');
+    }
+  } catch (e) { if (/restricted|subscribers|members/i.test(e.message)) throw e; }
+  if (!params) {
+    const pl = await post('player', { videoId: id, contentCheckOk: true, racyCheckOk: true }, 'ANDROID');
+    const ch = pl.videoDetails && pl.videoDetails.channelId; if (!ch) throw new Error('channel not found');
+    params = sendParamsFor(ch, id);
+  }
+  const r = await cookieAuth.post('live_chat/send_message', { params, clientMessageId: require('crypto').randomUUID(), richMessage: { textSegments: [{ text: textMsg }] } });
+  if (process.env.YTWEB_DEBUG) console.log('[chat send, cookies]', JSON.stringify(r).slice(0, 500));
+  if (r.error) throw new Error('YouTube: ' + r.error.message + ' (' + (r.error.status || r.error.code) + ')');
+  if (!(r.actions && r.actions.length)) throw new Error('YouTube did not accept the message');
+  return { author: cookieAuth.name() || 'You', text: textMsg };
 }
 
 module.exports = { dvrMaster, dvrMedia, dvrSegment, chatPage, addComment, sendChat, qualities, qualityMaster, liveQualities, related, home, account, search, video, comments, stream, thumb, hlsMaster, hlsProxy };

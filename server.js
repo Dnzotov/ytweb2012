@@ -3,6 +3,7 @@
 const http = require('http'), fs = require('fs'), path = require('path');
 const yt = require('./yt');
 const auth = require('./auth');
+const cookieAuth = require('./cookies');
 const crypto = require('crypto');
 const PIN = process.env.YT_PIN || '';
 const pinCookie = crypto.createHash('sha256').update('ytweb:' + PIN).digest('hex').slice(0, 32);
@@ -46,6 +47,13 @@ http.createServer((req, res) => {
   if (u.pathname === '/api/comments' && u.searchParams.get('t')) return json(() => yt.comments(u.searchParams.get('t')));
   let m;
   if (u.pathname === '/api/auth/status') return json(async () => ({ signedIn: auth.signedIn(), profile: auth.signedIn() ? await yt.account() : null }));
+  if (u.pathname === '/api/cookies' && req.method === 'GET') return json(() => cookieAuth.status());
+  if (u.pathname === '/api/cookies' && req.method === 'DELETE') return json(async () => { cookieAuth.clear(); return { ok: true }; });
+  if (u.pathname === '/api/cookies' && req.method === 'POST') {
+    let b = ''; req.on('data', d => { b += d; if (b.length > 200000) req.destroy(); });
+    req.on('end', async () => { try { const name = await cookieAuth.set(JSON.parse(b).cookies || ''); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, name })); } catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: String(e.message || e) })); } });
+    return;
+  }
   if (u.pathname === '/api/auth/start' && req.method === 'POST') return json(() => auth.start());
   if (u.pathname === '/api/auth/poll') return json(() => auth.poll());
   if (u.pathname === '/api/auth/logout' && req.method === 'POST') return json(async () => { await auth.logout(); return { ok: true }; });
