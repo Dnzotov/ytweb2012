@@ -16,7 +16,6 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
 > Never publish the `data/` folder.
 
 > Not affiliated with or endorsed by Google. "YouTube" is a trademark of Google LLC.
-> The original app resources are **not** in this repository; you extract them from your own APK.
 
 ## Features
 
@@ -39,24 +38,14 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
 ## Requirements
 
 - Node.js 18 or newer
-- [jadx](https://github.com/skylot/jadx), once, to extract the resources from the APK
 - Optional: [yt-dlp](https://github.com/yt-dlp/yt-dlp) in `PATH` for qualities above 360p and audio
   tracks. It uses `node` as its JavaScript runtime.
 
 ## Setup
 
-1. Get the APK of YouTube **2.2.14** for Android (for example from APKMirror).
-   Optionally also **3.3.0** for the experimental `?v=33` port.
-2. Extract the UI resources:
+1. Download or clone this repository.
 
-   ```sh
-   node tools/extract-res.js path/to/youtube-2.2.14.apk v22
-   node tools/extract-res.js path/to/youtube-3.3.0.apk v33   # optional
-   ```
-
-   They go to `public/apps/v22/res` and `public/apps/v33/res`, which git ignores.
-
-3. Start the server:
+2. Start the server:
 
    ```sh
    npm start                      # this computer only: http://127.0.0.1:8080
@@ -66,7 +55,7 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
    No `npm install` is needed to run it. The dev dependencies only supply the bundled copies of
    hls.js and Roboto.
 
-4. On the phone (same Wi-Fi) open `http://<computer-IP>:8080`. Find the IP with `ip -4 addr`
+3. On the phone (same Wi-Fi) open `http://<computer-IP>:8080`. Find the IP with `ip -4 addr`
    (Linux) or `ipconfig` (Windows). Then add it to the home screen:
    - iPhone, Safari: Share → Add to Home Screen
    - Android, Chrome: ⋮ → Add to Home screen
@@ -133,4 +122,4 @@ Third-party parts and their licenses are listed in [NOTICE](NOTICE). The license
 - Roboto font, SIL OFL 1.1
 - yt2009, Apache-2.0 (reference for the playback approach; no code copied)
 
-The YouTube APK resources are Google's property and are not covered by this license.
+The original app interface files are Google's property and are not covered by this license.
