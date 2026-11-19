@@ -17,3 +17,5 @@ Not included and not covered by this license:
 - YouTube APK resources (layouts, images, strings) are Google's property. They are extracted
   locally from an APK you provide (tools/extract-res.js) and are ignored by git.
 - "YouTube" is a trademark of Google LLC. This project is not affiliated with or endorsed by Google.
+- YouTube.js (https://github.com/LuanRT/YouTube.js), MIT — the live chat "send" params format in yt.js
+  follows its LiveChat.sendMessage. No code copied.

@@ -299,13 +299,14 @@ async function addComment(id, textMsg) {
 async function sendChat(id, textMsg) {
   const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to chat'); e.code = 401; throw e; }
   // Only the TV client accepts our OAuth token, and the TV app has no chat box, so YouTube never hands us the
-  // "send" params. They are a small protobuf { 1: { 5: { 1: channelId, 2: videoId } }, 2: 2, 3: 4 }, built here.
+  // "send" params. We build them like YouTube.js (LuanRT/YouTube.js, LiveChat.sendMessage, MIT):
+  // protobuf { 1: { 5: { 1: channelId, 2: videoId } }, 2: 1, 3: 4 } -> base64 -> encodeURIComponent -> base64 again.
   const pl = await post('player', { videoId: id, contentCheckOk: true, racyCheckOk: true }, 'ANDROID');
   const ch = pl.videoDetails && pl.videoDetails.channelId; if (!ch) throw new Error('channel not found');
   const fld = (n, b) => Buffer.concat([Buffer.from([(n << 3) | 2, b.length]), b]);
-  const inner = Buffer.concat([fld(1, Buffer.from(ch)), fld(2, Buffer.from(id))]);
-  const params = Buffer.concat([fld(1, fld(5, inner)), Buffer.from([0x10, 0x02, 0x18, 0x04])]).toString('base64');
-  const cmid = 'yw' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);   // the official apps send one with every message
+  const proto = Buffer.concat([fld(1, fld(5, Buffer.concat([fld(1, Buffer.from(ch)), fld(2, Buffer.from(id))]))), Buffer.from([0x10, 0x01, 0x18, 0x04])]);
+  const params = Buffer.from(encodeURIComponent(proto.toString('base64'))).toString('base64');
+  const cmid = require('crypto').randomUUID();
   const r = await post('live_chat/send_message', { params, clientMessageId: cmid, richMessage: { textSegments: [{ text: textMsg }] } }, 'TV', tok);
   if (process.env.YTWEB_DEBUG) console.log('[chat send]', JSON.stringify(r).slice(0, 500));
   if (r.error) throw new Error('YouTube: ' + r.error.message + ' (' + (r.error.status || r.error.code) + ')');
