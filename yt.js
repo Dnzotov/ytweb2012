@@ -289,10 +289,8 @@ async function postAuthed(endpoint, body) {
   const tok = await auth.token(); if (!tok) { const e = new Error('Sign in to post'); e.code = 401; throw e; }
   let last;
   if (process.env.YTWEB_DEBUG) console.log('[post]', endpoint);
-  for (const c of ['TV', 'WEB']) {   // the TV client accepts the OAuth token (WEB answers 400 to it)
-    try { const r = await post(endpoint, body, c, tok); if (ok(r)) return r; last = r; } catch (e) { last = { error: { message: e.message } }; }
-  }
-  throw new Error((last && last.error && last.error.message) || 'YouTube refused the request');
+  try { const r = await post(endpoint, body, 'TV', tok); if (ok(r)) return r; last = r; } catch (e) { last = { error: { message: e.message } }; }   // only the TV client accepts our OAuth token
+  throw new Error('YouTube: ' + ((last && last.error && last.error.message) || 'refused the request'));
 }
 async function addComment(id, textMsg) {
   await postAuthed('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
@@ -307,7 +305,11 @@ async function sendChat(id, textMsg) {
   const fld = (n, b) => Buffer.concat([Buffer.from([(n << 3) | 2, b.length]), b]);
   const inner = Buffer.concat([fld(1, Buffer.from(ch)), fld(2, Buffer.from(id))]);
   const params = Buffer.concat([fld(1, fld(5, inner)), Buffer.from([0x10, 0x02, 0x18, 0x04])]).toString('base64');
-  await postAuthed('live_chat/send_message', { params, richMessage: { textSegments: [{ text: textMsg }] } });
+  const cmid = 'yw' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);   // the official apps send one with every message
+  const r = await post('live_chat/send_message', { params, clientMessageId: cmid, richMessage: { textSegments: [{ text: textMsg }] } }, 'TV', tok);
+  if (process.env.YTWEB_DEBUG) console.log('[chat send]', JSON.stringify(r).slice(0, 500));
+  if (r.error) throw new Error('YouTube: ' + r.error.message + ' (' + (r.error.status || r.error.code) + ')');
+  if (!(r.actions && r.actions.length)) throw new Error('YouTube did not accept the message');
   const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg };
 }
 
@@ -315,7 +317,9 @@ async function sendChat(id, textMsg) {
 // YouTube's live HLS manifest only covers the last 30 s. The DASH (adaptive) URLs of a live stream accept &sq=N for any
 // 5-second segment in the DVR window (up to 12 h), and each segment is a complete fMP4 file (ftyp+moov+moof+mdat).
 // We describe them as an HLS playlist: one init segment (ftyp+moov) and media segments with the init part cut off.
-const DVR_WINDOW = Math.max(60, +process.env.DVR_SEGMENTS || 1440);   // 1440 x 5 s = 2 h of rewind
+// How far back: everything YouTube still keeps (often the whole stream), capped at DVR_MAX_HOURS (default 24 h)
+// so the playlist stays small enough for phones.
+const DVR_CAP = Math.max(60, Math.round((+process.env.DVR_MAX_HOURS || 24) * 3600 / 5));
 const dvrCache = new Map();   // id -> { exp, fmts: {itag: fmt}, video: [fmt], audio: fmt, head, headAt, target }
 async function dvrInfo(id) {
   const c = dvrCache.get(id); if (c && c.exp > Date.now()) return c;
@@ -360,14 +364,30 @@ async function dvrMaster(id, h, res) {
     res.writeHead(200, { 'content-type': mpeg, 'cache-control': 'no-store' }); res.end(out.join('\n') + '\n');
   } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
 }
-async function dvrMedia(id, itag, res) {
+function segAvailable(info, sq) {
+  const u = new URL(info.audio.url + '&sq=' + sq);
+  return new Promise(ok => { const r = https.get({ host: u.host, path: u.pathname + u.search, headers: { 'user-agent': CLIENTS.ANDROID.ua, range: 'bytes=0-0' }, timeout: 10000 }, res => { res.resume(); ok(res.statusCode < 300); }); r.on('error', () => ok(false)); r.on('timeout', () => { r.destroy(); ok(false); }); });
+}
+// oldest segment YouTube still serves, found by binary search once and cached for 10 minutes
+async function oldestSeq(info, head) {
+  if (info.oldest != null && Date.now() - info.oldestAt < 600000) return Math.max(info.oldest, head - DVR_CAP + 1);
+  let lo = Math.max(0, head - DVR_CAP + 1);
+  if (!(await segAvailable(info, lo))) { let a = lo, b = head; while (b - a > 1) { const m = (a + b) >> 1; if (await segAvailable(info, m)) b = m; else a = m; } lo = b; }
+  info.oldest = lo; info.oldestAt = Date.now(); return lo;
+}
+function sendPlaylist(req, res, text) {
+  const h = { 'content-type': mpeg, 'cache-control': 'no-store' };
+  if (/\bgzip\b/.test(req.headers['accept-encoding'] || '')) { h['content-encoding'] = 'gzip'; res.writeHead(200, h); return res.end(require('zlib').gzipSync(text)); }
+  res.writeHead(200, h); res.end(text);
+}
+async function dvrMedia(id, itag, res, req) {
   try {
     const d = await dvrInfo(id); if (!d.fmts[itag]) { res.writeHead(404); return res.end(); }
-    const head = await headSeq(d), first = Math.max(0, head - DVR_WINDOW + 1), T = d.target;
+    const head = await headSeq(d), first = await oldestSeq(d, head), T = d.target;
     const out = ['#EXTM3U', '#EXT-X-VERSION:7', `#EXT-X-TARGETDURATION:${T}`, `#EXT-X-MEDIA-SEQUENCE:${first}`, '#EXT-X-INDEPENDENT-SEGMENTS', `#EXT-X-MAP:URI="/lseg/${id}/${itag}/init"`];
     // the newest segment may still be growing, so the list ends one before the head
-    for (let sq = first; sq < head; sq++) out.push(`#EXTINF:${T}.0,`, `/lseg/${id}/${itag}/${sq}`);
-    res.writeHead(200, { 'content-type': mpeg, 'cache-control': 'no-store' }); res.end(out.join('\n') + '\n');
+    for (let sq = first; sq < head; sq++) out.push(`#EXTINF:${T}.0,`, `/lseg/${id}/${itag}/${sq}`);   // ~35 bytes each, gzip makes it ~10x smaller
+    sendPlaylist(req, res, out.join('\n') + '\n');
   } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
 }
 async function dvrSegment(id, itag, sq, res) {

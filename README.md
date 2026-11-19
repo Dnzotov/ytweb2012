@@ -20,7 +20,7 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
   (stops at a memory budget; reload the page to reset)
 - Player: original controls, seeking, fullscreen, quality (Auto, 1080p … 144p), playback speed and
   audio tracks (dubbed languages) when a video has them
-- Live streams with rewind (DVR, last 2 hours by default, `DVR_SEGMENTS` = number of 5-second segments) and a LIVE button to jump back
+- Live streams with rewind back to the start (as far as YouTube keeps it, capped by `DVR_MAX_HOURS`, default 24) and a LIVE button to jump back
 - Live chat and chat replay (synced to the playhead), also as an overlay in fullscreen (not on iOS)
 - Posting comments and live chat messages after Google sign-in
 - Optional Google sign-in for your own recommendations
@@ -69,6 +69,8 @@ Open it on a phone, add it to the home screen, and it behaves like an app. It is
 | `PORT` | `8080` | Port |
 | `YT_PIN` | none | If set, the browser must enter this PIN once (stored as a cookie) |
 | `YTDLP` | `yt-dlp` | Path to yt-dlp |
+| `DVR_MAX_HOURS` | `24` | How far back a live stream can be rewound |
+| `YTWEB_DEBUG` | none | Log YouTube's answers to posting comments and chat messages |
 
 ## Security
 

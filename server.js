@@ -62,7 +62,7 @@ http.createServer((req, res) => {
   const aq = (u.searchParams.get('a') || '').slice(0, 40);
   if ((m = /^\/hls\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.hlsMaster(m[1], res, hq, aq);
   if ((m = /^\/ldvr\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.dvrMaster(m[1], hq, res);
-  if ((m = /^\/ldvr\/([\w-]{11})\/(\d+)\.m3u8$/.exec(u.pathname))) return yt.dvrMedia(m[1], +m[2], res);
+  if ((m = /^\/ldvr\/([\w-]{11})\/(\d+)\.m3u8$/.exec(u.pathname))) return yt.dvrMedia(m[1], +m[2], res, req);
   if ((m = /^\/lseg\/([\w-]{11})\/(\d+)\/(init|\d+)$/.exec(u.pathname))) return yt.dvrSegment(m[1], +m[2], m[3], res);
   if ((m = /^\/qhls\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.qualityMaster(m[1], hq, aq, res);
   if (u.pathname === '/api/qualities' && ID.test(u.searchParams.get('id'))) return json(() => u.searchParams.get('live') === '1' ? yt.liveQualities(u.searchParams.get('id')) : yt.qualities(u.searchParams.get('id')));
