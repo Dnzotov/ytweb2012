@@ -608,7 +608,14 @@
       const row = el('div', '', { display: 'flex', gap: '4px', padding: '4px', borderTop: '1px solid #333', background: '#111' });
       const inp = el('input', '', { flex: '1', minWidth: '0', fontSize: '14px', padding: '7px', border: '1px solid #666', borderRadius: '3px', background: '#fff', color: '#000', fontFamily: 'inherit' }); inp.placeholder = 'Say something…'; inp.maxLength = 200;
       const send = el('div', '', { padding: '0 12px', display: 'flex', alignItems: 'center', border: '1px solid #555', borderRadius: '3px', background: 'linear-gradient(#444,#222)', color: '#fff', fontSize: '13px', cursor: 'pointer' }); send.textContent = 'Send';
-      const go_ = async () => { const t = inp.value.trim(); if (!t) return; send.textContent = '…'; try { const m = await API.sendChat(v.id, t); inp.value = ''; add([{ ...m, id: 'me' + Date.now() }]); } catch (e) { toast(e.status === 401 ? e.message : 'Message not sent: ' + e.message); } send.textContent = 'Send'; };
+      // no local copy: the message comes back from YouTube with the public @handle on the next chat update
+      let busy = false, resetT;
+      const go_ = async () => {
+        const t = inp.value.trim(); if (!t || busy) return; busy = true; clearTimeout(resetT); send.textContent = '…';
+        try { await API.sendChat(v.id, t); inp.value = ''; send.textContent = 'Sent'; send.style.color = '#8bc34a'; }
+        catch (e) { send.textContent = 'Send'; toast(e.status === 401 ? e.message : 'Message not sent: ' + e.message); }
+        busy = false; resetT = setTimeout(() => { send.textContent = 'Send'; send.style.color = '#fff'; }, 2000);
+      };
       send.onclick = go_; inp.addEventListener('keydown', e => { if (e.key === 'Enter') go_(); });
       row.append(inp, send); box.appendChild(row);
     }

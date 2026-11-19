@@ -303,10 +303,10 @@ async function addComment(id, textMsg) {
   if (cookieAuth.has()) {
     const r = await cookieAuth.post('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
     if (!ok(r)) throw new Error('YouTube: ' + ((r.error && r.error.message) || 'refused the comment'));
-    return { author: cookieAuth.name() || 'You', text: textMsg, time: 'just now' };
+    const m = await me().catch(() => null); return { author: (m && (m.handle || m.name)) || 'You', text: textMsg, time: 'just now' };
   }
   await postAuthed('comment/create_comment', { commentText: textMsg, createCommentParams: commentParams(id) });
-  const p = auth.profile(); return { author: (p && p.name) || 'You', text: textMsg, time: 'just now' };
+  const m = await me().catch(() => null); return { author: (m && (m.handle || m.name)) || 'You', text: textMsg, time: 'just now' };
 }
 async function sendChat(id, textMsg) {
   if (cookieAuth.has()) return sendChatCookies(id, textMsg);
