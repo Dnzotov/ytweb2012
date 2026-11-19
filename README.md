@@ -8,6 +8,13 @@ supplies today's YouTube content.
 Open it on a phone, add it to the home screen, and it behaves like an app. It is made with iOS
 (Safari) in mind and works on Android too.
 
+> # ⚠️ WARNING: 1 server = 1 account
+> The Google account you sign in with is stored **on the server**. **Everyone who can open your server's
+> address uses your account**: they see your subscriptions, recommendations and history, and can comment,
+> like and write in chat as you. Never give the address of a server with a signed-in account to other people.
+> Want to share? Do not sign in on that server, or run a separate server with a separate (spare) account per person.
+> Never publish the `data/` folder.
+
 > Not affiliated with or endorsed by Google. "YouTube" is a trademark of Google LLC.
 > The original app resources are **not** in this repository; you extract them from your own APK.
 
