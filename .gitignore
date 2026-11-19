@@ -1,0 +1,9 @@
+node_modules/
+# Google sign-in tokens (created at runtime)
+data/
+# Resources extracted from the original APKs (Google's property, see README)
+public/apps/*/res/
+*.apk
+.DS_Store
+__pycache__/
+*.pyc

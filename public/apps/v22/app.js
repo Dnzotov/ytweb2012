@@ -1,0 +1,573 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// YouTube 2.2.14 UI. Layouts, drawables, strings, colors come from the original APK resources.
+(async function () {
+  const RT = window.AndroidRT, V = window.Views, D = window.DATA, screen = document.getElementById('screen');
+  await RT.loadValues();
+  const S = n => RT.R.string[n] || n;
+  const fmtS = (n, ...a) => S(n).replace(/%(\d)\$,?[ds]/g, (m, i) => (/,d/.test(m) ? D.fmt(a[i - 1]) : a[i - 1])).replace(/\\'/g, "'");
+  const el = (tag, cls, css) => { const e = document.createElement(tag); if (cls) e.className = cls; if (css) Object.assign(e.style, css); return e; };
+  const img = (name, hd = true) => `url(apps/v22/res/drawable-hdpi-v4/${name}.png)`;
+  const dpr = 1.5;
+  const sizeOf = async name => { const d = await RT.drawable('@drawable/' + name); return RT.intrinsic(d); };
+
+  // ---- shell: app area + emulated Android key row (Back / Menu), outside the app UI ----
+  screen.replaceChildren();
+  const app = el('div', 'appview', { flex: '1', position: 'relative', overflow: 'hidden', background: '#000' });
+  const keys = el('div', 'keys', { flex: '0 0 auto', height: '38px', display: 'flex', justifyContent: 'space-around', alignItems: 'center', background: '#111', borderTop: '1px solid #222', paddingBottom: 'env(safe-area-inset-bottom)' });
+  const keyBtn = (label, fn) => { const b = el('div', '', { flex: '1', textAlign: 'center', color: '#8a8a8a', fontSize: '18px', lineHeight: '38px', cursor: 'pointer', userSelect: 'none' }); b.textContent = label; b.onclick = fn; keys.appendChild(b); return b; };
+  keyBtn('◁', () => history.back());
+  keyBtn('☰', () => toggleMenu());
+  // Tablet mode: layouts follow YouTube 3.x for Honeycomb tablets (layout-sw600dp): video grids, player with info on the left, related on the right.
+  let TABLET = localStorage.tablet_mode === '1';
+  const applyMode = () => { screen.classList.toggle('tablet', TABLET); tabKey.textContent = TABLET ? '▯' : '▭'; tabKey.title = TABLET ? 'Phone mode' : 'Tablet mode'; };
+  const tabKey = keyBtn('▭', () => { TABLET = !TABLET; localStorage.tablet_mode = TABLET ? '1' : '0'; applyMode(); toast(TABLET ? 'Tablet mode' : 'Phone mode'); render(history.state || { name: 'home' }); });
+  applyMode();
+  screen.appendChild(app); screen.appendChild(keys);
+
+  // ---- navigation (browser history = Android back stack) ----
+  const routes = {};
+  let current = null;
+  async function go(name, arg, replace) {
+    const st = { name, arg };
+    if (replace) history.replaceState(st, ''); else history.pushState(st, '');
+    await render(st);
+  }
+  async function render(st) {
+    closeMenu(); closeSearch(); closeDialogs();
+    const prev = current && current.cleanup; if (prev) prev();
+    app.replaceChildren();
+    const root = await routes[st.name](st.arg || {});
+    current = { root, cleanup: root.__cleanup };
+    root.style.width = '100%'; root.style.height = '100%';
+    app.appendChild(root);
+    const relayout = () => V.layoutTree(root);
+    relayout(); document.fonts.ready.then(relayout); requestAnimationFrame(relayout);
+    new ResizeObserver(relayout).observe(app);
+  }
+  window.addEventListener('popstate', e => render(e.state || { name: 'home' }));
+
+  // ---- shared widgets ----
+  async function iconBtn(drawableRef, onClick) {
+    const d = await RT.drawable(drawableRef);
+    const b = el('div', 'ib', { height: '51px', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0 6px', cursor: 'pointer' });
+    const i = el('div'); b.appendChild(i);
+    const set = st => { const p = RT.pick(d, st); i.style.width = p.w + 'px'; i.style.height = p.h + 'px'; i.style.background = `url(${p.url}) center/100% 100% no-repeat`; };
+    set({}); b.addEventListener('pointerdown', () => set({ pressed: true })); ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => b.addEventListener(e, () => set({})));
+    b.onclick = onClick; return b;
+  }
+  async function textBtn(label, onClick, withIcon) {
+    const b = el('div', 'hb', { height: '51px', display: 'flex', alignItems: 'center', padding: '0 6px', fontSize: '13px', color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' });
+    if (withIcon) { const d = await RT.drawable('@drawable/more_drawable'); const p = RT.pick(d, {}); const i = el('div', '', { width: p.w + 'px', height: p.h + 'px', background: `url(${p.url}) center/100% 100%`, marginRight: '4px' }); b.appendChild(i); }
+    b.appendChild(document.createTextNode(label)); b.onclick = onClick; return b;
+  }
+  async function header(root, { title, buttons = [] } = {}) {
+    const h = V.find(root, 'header_buttons'); const logo = V.find(root, 'header_logo');
+    logo.style.cursor = 'pointer'; logo.onclick = () => go('home');
+    for (const b of buttons) h.appendChild(b);
+    if (title) { const t = V.find(root, 'header_title'); t.querySelector('.t').textContent = title; V.setVisible(t, true); }
+  }
+  const homeButtons = async () => [await iconBtn('@drawable/search_drawable', () => openSearch())];
+
+  // list item pressed state ("duplicateParentState")
+  function pressable(item) {
+    const all = [item, ...item.querySelectorAll('.v')];
+    const set = v => all.forEach(e => e.__state && V.setState(e, 'pressed', v));
+    item.addEventListener('pointerdown', () => { set(true); item.style.background = 'linear-gradient(#ffd27a,#ffa40c)'; });
+    ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => item.addEventListener(e, () => { set(false); item.style.background = ''; }));
+  }
+  const thumbCss = (e, v) => { e.__img.dataset.thumb = v.thumb; e.__img.classList.add('lazy-thumb'); e.__img.style.backgroundSize = 'cover'; };
+  async function videoItem(v) {
+    const it = await V.inflate('video_item', null);
+    const t = id => V.find(it, id);
+    t('title').querySelector('.t').textContent = v.title;
+    t('author').querySelector('.t').textContent = fmtS('video_author', v.author);
+    t('detail').querySelector('.t').textContent = v.views ? fmtS('age_and_views', v.date || '', v.views) : (v.date || '');
+    t('duration').querySelector('.t').textContent = v.live ? 'LIVE' : D.dur(v.dur);
+    if (!v.dur && !v.live) V.setVisible(t('duration'), false);
+    thumbCss(t('thumbnail'), v);
+    it.style.width = '100%'; it.__lp.layout_width = 'match_parent';
+    pressable(it); it.style.cursor = 'pointer';
+    it.onclick = () => go('watch', { id: v.id });
+    return it;
+  }
+  async function simpleItem(layout, text, onClick) {
+    const it = await V.inflate(layout, null);
+    V.find(it, 'title').querySelector('.t').textContent = text;
+    pressable(it); it.style.cursor = 'pointer'; if (onClick) it.onclick = onClick; return it;
+  }
+  const divider = () => el('div', '', { height: '1px', background: '#2a2a2a' });
+  // Tablet grid card. Geometry from YouTube 3.3.0 layout-sw600dp/video_item.xml: 228dp wide, 128dp thumbnail, duration strip over the thumbnail, title below.
+  function videoCard(v) {
+    const c = el('div', 'card', { position: 'relative', cursor: 'pointer', background: '#111', border: '1px solid #2a2a2a', paddingBottom: '6px', minWidth: '0' });
+    const th = el('div', 'lazy-thumb', { position: 'relative', width: '100%', aspectRatio: '228/128', background: '#000 center/cover no-repeat' }); th.dataset.thumb = v.thumb;
+    const du = el('div', '', { position: 'absolute', left: 0, right: 0, bottom: 0, padding: '2px 4px', fontSize: '12px', fontWeight: 700, color: '#fff', background: 'rgba(0,0,0,.6)', textAlign: 'right' }); du.textContent = v.live ? 'LIVE' : D.dur(v.dur); if (v.dur || v.live) th.appendChild(du);
+    const t = el('div', '', { padding: '4px 4px 0', fontSize: '13px', fontWeight: 700, color: '#fff', lineHeight: 1.2, height: 'calc(2.4em + 4px)', boxSizing: 'border-box', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }); t.textContent = v.title;
+    const a = el('div', '', { padding: '2px 4px 0', fontSize: '12px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }); a.textContent = fmtS('video_author', v.author);
+    const d = el('div', '', { padding: '0 4px', fontSize: '12px', color: '#888', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }); d.textContent = v.views ? fmtS('age_and_views', v.date || '', v.views) : (v.date || '');
+    c.append(th, t, a, d);
+    c.addEventListener('pointerdown', () => c.style.background = 'linear-gradient(#ffd27a,#ffa40c)'); ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => c.addEventListener(e, () => c.style.background = '#111'));
+    c.onclick = () => go('watch', { id: v.id }); return c;
+  }
+  // Endless lists. A session budget limits how much is loaded: at most BUDGET.max video items (fewer on iOS, which kills tabs
+  // that use too much memory) or 70% of the JS heap where the browser reports it. Reloading the page resets the budget.
+  const IOS_LIKE = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const BUDGET = { loaded: 0, max: IOS_LIKE ? 600 : 1500 };
+  const memoryLow = () => { const m = performance.memory; if (m && m.jsHeapSizeLimit && m.usedJSHeapSize / m.jsHeapSizeLimit > 0.7) return true; return BUDGET.loaded >= BUDGET.max; };
+  async function fillList(list, src, maker, emptyMsg, cols) {
+    const page = Array.isArray(src) ? { items: src, more: null } : (src || { items: [], more: null });
+    if (list.__onScroll) list.removeEventListener('scroll', list.__onScroll);
+    if (list.__io) list.__io.disconnect();
+    list.replaceChildren();
+    const grid = TABLET && maker === videoItem && page.items.length;
+    if (grid) Object.assign(list.style, { display: 'grid', gridTemplateColumns: cols ? `repeat(${cols}, minmax(0,1fr))` : 'repeat(auto-fill, minmax(200px, 1fr))', gridTemplateRows: 'none', gridAutoRows: 'auto',
+      justifyItems: 'stretch', alignItems: 'stretch', gap: '6px', padding: '12px 16px', alignContent: 'start', overflowY: 'auto' });
+    if (!page.items.length && !page.more) { const m = el('div', '', { padding: '20px', textAlign: 'center', color: '#888', fontSize: '15px' }); m.textContent = S(emptyMsg || 'no_videos_found'); list.appendChild(m); return; }
+    // thumbnails are set only near the visible area and dropped again far away, so decoded images do not pile up
+    const io = new IntersectionObserver(es => es.forEach(e => { const t = e.target; t.style.backgroundImage = e.isIntersecting ? `url(${t.dataset.thumb})` : ''; }), { root: list, rootMargin: '600px 0px' });
+    list.__io = io;
+    const footer = el('div', 'list-footer', { padding: '14px', textAlign: 'center', color: '#888', fontSize: '14px', gridColumn: '1 / -1', display: 'none' });
+    list.appendChild(footer);
+    const seen = new Set(); let more = page.more, busy = false;
+    const isVideo = maker === videoItem;
+    async function add(items) {
+      const added = [];
+      for (const x of items) {
+        if (x && x.id) { if (seen.has(x.id)) continue; seen.add(x.id); }
+        const node = grid ? videoCard(x) : await maker(x);
+        list.insertBefore(node, footer); if (!grid) list.insertBefore(divider(), footer);
+        node.querySelectorAll('.lazy-thumb').forEach(t => io.observe(t)); if (node.classList.contains('lazy-thumb')) io.observe(node);
+        added.push(node); if (isVideo) BUDGET.loaded++;
+      }
+      if (list.isConnected) added.forEach(n => V.layoutTree(n));
+    }
+    const status = (txt, onTap) => { footer.style.display = txt ? 'block' : 'none'; footer.replaceChildren(); if (!txt) return; footer.textContent = txt; footer.onclick = onTap || null; footer.style.cursor = onTap ? 'pointer' : ''; };
+    async function maybeMore() {
+      if (busy || !more || !list.isConnected || !list.clientHeight) return;
+      if (list.scrollTop + list.clientHeight < list.scrollHeight - 900) return;
+      if (memoryLow()) { more = null; return status('The list is full. Refresh the page to load more.'); }
+      busy = true; footer.style.display = 'block'; footer.replaceChildren(el('div', 'spinner', { width: '24px', height: '24px', margin: '0 auto', borderColor: 'rgba(255,255,255,.2)', borderTopColor: '#fff' }));
+      const loader = more;
+      try { const p = await loader(); more = p.more; await add(p.items); status(''); }
+      catch (e) { status('Could not load more. Tap to retry.', () => { more = loader; status(''); maybeMore(); }); more = null; }
+      busy = false;
+      requestAnimationFrame(maybeMore);   // keep going until the screen is filled
+    }
+    list.__onScroll = maybeMore; list.__maybeMore = maybeMore;
+    list.addEventListener('scroll', maybeMore, { passive: true });
+    await add(page.items);
+    setTimeout(maybeMore, 300);
+  }
+
+  // TabRow + Workspace (swipe between pages)
+  async function tabs(root, labels, pages) {
+    const row = V.find(root, 'tabrow'); const ws = V.find(root, 'workspace');
+    const d = await RT.drawable('@drawable/tab_drawable'); const pad = RT.bgPadding(d);
+    row.style.display = 'flex'; const els = [];
+    for (let i = 0; i < labels.length; i++) {
+      const t = await V.inflate('tab', null, {}); t.__bg = d; { const hs = [RT.pick(d, {}), RT.pick(d, { selected: true })].map(x => x && x.kind === 'nine' ? x.n.ch / x.n.sc : 0); t.style.minHeight = Math.max(...hs) + 'px'; } if (pad) t.style.padding = `${pad.t}px ${pad.r}px ${pad.b}px ${pad.l}px`;
+      t.__text.textContent = labels[i]; t.style.flex = '1 1 0'; t.style.minWidth = '0'; t.style.width = 'auto'; t.style.justifyContent = 'center';
+      t.__text.style.textAlign = 'center'; t.style.cursor = 'pointer';
+      t.addEventListener('pointerdown', () => V.setState(t, 'pressed', true)); ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => t.addEventListener(e, () => V.setState(t, 'pressed', false)));
+      t.onclick = () => sel(i); row.appendChild(t); els.push(t);
+    }
+    let cur = 0;
+    function sel(i) { cur = i; els.forEach((t, k) => V.setState(t, 'selected', k === i)); pages.forEach((p, k) => { p.style.display = k === i ? (p.__disp || 'block') : 'none'; }); V.layoutTree(root); const p = pages[i]; setTimeout(() => p.__maybeMore && p.__maybeMore(), 50); }
+    pages.forEach(p => { p.__disp = p.style.display && p.style.display !== 'none' ? p.style.display : 'block'; ws.appendChild(p); });
+    sel(0);
+    let sx = 0, sy = 0;
+    ws.addEventListener('touchstart', e => { sx = e.touches[0].clientX; sy = e.touches[0].clientY; }, { passive: true });
+    ws.addEventListener('touchend', e => { const dx = e.changedTouches[0].clientX - sx, dy = e.changedTouches[0].clientY - sy; if (Math.abs(dx) > 70 && Math.abs(dx) > 2 * Math.abs(dy)) sel(Math.max(0, Math.min(labels.length - 1, cur + (dx < 0 ? 1 : -1)))); }, { passive: true });
+    return sel;
+  }
+  const newPage = () => el('div', 'page', { position: 'absolute', inset: '0', overflowY: 'auto', display: 'block' });
+
+  // ---- screens ----
+  routes.home = async () => {
+    const root = await V.inflate('home_activity', null); await header(root, { buttons: await homeButtons() });
+    await fillList(V.find(root, 'videos'), await API.home(), videoItem); return root;
+  };
+  routes.results = async ({ q }) => {
+    const root = await V.inflate('results_activity', null); await header(root, { buttons: await homeButtons(), title: q });
+    await fillList(V.find(root, 'videos'), await API.search(q || ''), videoItem); return root;
+  };
+  routes.categories = async () => {
+    const root = await V.inflate('categories_activity', null); await header(root, { buttons: await homeButtons() });
+    const list = V.find(root, 'categories');
+    if (TABLET) {
+      // layout-sw600dp/browse_controller.xml: category sidebar (232dp) + video grid
+      const body = el('div', '', { display: 'flex', flex: '1 1 0', minHeight: '0', width: '100%' });
+      const side = el('div', '', { flex: '0 0 232px', margin: '0 28px', overflowY: 'auto', paddingTop: '8px' });
+      const grid = el('div', '', { flex: '1 1 0', minWidth: '0', overflowY: 'auto' });
+      list.parentNode.insertBefore(body, list); list.remove(); body.append(side, grid);
+      const items = [];
+      const pick = async (c, it) => { items.forEach(x => { x.style.background = ''; x.style.color = '#fff'; }); it.style.background = 'linear-gradient(#ffd27a,#ffa40c)'; it.style.color = '#000'; await fillList(grid, await API.search(c), videoItem); };
+      for (const c of D.categories) { const it = el('div', '', { padding: '12px 10px', fontSize: '17px', cursor: 'pointer', borderBottom: '1px solid #222', color: '#fff' }); it.textContent = c; it.onclick = () => pick(c, it); side.appendChild(it); items.push(it); }
+      pick(D.categories[0], items[0]);
+      return root;
+    }
+    for (const c of D.categories) { const it = await V.inflate('category_item', null); it.querySelector('.t').textContent = c; pressable(it); it.style.cursor = 'pointer'; it.onclick = () => go('browse', { category: c }); list.appendChild(it); list.appendChild(divider()); }
+    return root;
+  };
+  routes.browse = async ({ category }) => {
+    const root = await V.inflate('browse_activity', null); await header(root, { buttons: await homeButtons(), title: category });
+    const names = ['most_viewed_videos', 'top_rated_videos', 'most_discussed_videos', 'top_favorited_videos'];
+    const pages = []; const suffix = ['', ' best', ' popular', ' top']; 
+    const lists = await Promise.all(suffix.map(s => API.search(category + s)));
+    for (let i = 0; i < 4; i++) { const p = newPage(); await fillList(p, lists[i], videoItem); pages.push(p); }
+    await tabs(root, names.map(S), pages); return root;
+  };
+  async function channelScreen(layout, who, own) {
+    const root = await V.inflate(layout, null);
+    const btns = await homeButtons();
+    await header(root, { buttons: btns });
+    const me = D.me;
+    const acc = own ? await API.authStatus() : null;
+    V.find(root, 'channel_title').querySelector('.t').textContent = own ? ((acc && acc.profile && acc.profile.name) || me.name) : who;
+    const st = (id, t) => { V.find(root, id).querySelector('.t').innerHTML = t.replace(/<font color='(\w+)'>/g, '<span style="color:$1">').replace(/<\/font>/g, '</span>'); };
+    st('channel_views', own ? fmtS('channel_stats_views', me.views) : fmtS('channel_stats_views', 120344));
+    st('channel_uploaded', own ? fmtS('channel_stats_uploaded', me.uploaded) : fmtS('channel_stats_uploaded', 24));
+    st('channel_subscribers', own ? fmtS('channel_stats_subscribers', me.subscribers) : fmtS('channel_stats_subscribers', 5120));
+    const av = V.find(root, 'channel_avatar'); av.__img.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_launcher_youtube.png)`; av.__img.style.backgroundSize = 'cover'; av.style.background = '#222';
+    const vids = own ? me.uploads.map(v => ({ ...v, thumb: v.clip.thumb, src: v.clip.src })) : await API.search(who);
+    const up = newPage(), fav = newPage(), pl = newPage(), extra = newPage();
+    await fillList(up, vids, videoItem, 'no_uploads_found');
+    await fillList(fav, own ? me.favorites.map(v => ({ ...v, thumb: v.clip.thumb, src: v.clip.src })) : [], videoItem, 'no_favorites_found');
+    await fillList(pl, own ? me.playlists : ['Favorites mix', 'Best of'], t => simpleItem('playlist_item', t, () => go('results', { q: '' })), 'no_playlists_found');
+    if (own) { await fillList(extra, me.subscriptions, t => simpleItem('subscription_item', t, () => go('channel', { who: t })), 'no_subscriptions_found'); }
+    else { await fillList(extra, [], null, 'no_events_found'); }
+    const labels = own ? ['channel_uploads', 'channel_favorites', 'channel_playlists', 'channel_subscriptions'] : ['channel_uploads', 'channel_favorites', 'channel_activity', 'channel_playlists'];
+    const pages = own ? [up, fav, pl, extra] : [up, fav, extra, pl];
+    if (TABLET) {
+      // layout-sw600dp/channel_sidebar.xml: channel info in a 272dp sidebar, lists on the right
+      const hdr = V.find(root, 'channel_title').closest('.LinearLayout').parentElement;
+      const body = el('div', '', { display: 'flex', flex: '1 1 0', minHeight: '0', width: '100%' });
+      const side = el('div', '', { flex: '0 0 272px', margin: '16px 0 14px 16px', borderRight: '1px solid #222', overflow: 'hidden' });
+      const right = el('div', '', { flex: '1 1 0', display: 'flex', flexDirection: 'column', minWidth: '0' });
+      const tabrow = V.find(root, 'tabrow'), ws = V.find(root, 'workspace');
+      hdr.parentNode.insertBefore(body, hdr); side.appendChild(hdr); hdr.style.flexDirection = 'column'; hdr.style.alignItems = 'flex-start'; hdr.style.width = '100%';
+      right.append(tabrow, ws); ws.style.flex = '1 1 0'; ws.style.minHeight = '0'; ws.style.height = 'auto'; ws.style.position = 'relative';
+      body.append(side, right);
+    }
+    await tabs(root, labels.map(S), pages); return root;
+  }
+  routes.mychannel = () => channelScreen('my_channel_activity', null, true);
+  routes.channel = ({ who }) => channelScreen('channel_activity', who, false);
+
+  // ---- watch ----
+  routes.watch = async ({ id }) => {
+    const v = await API.video(id);
+    const root = await V.inflate('watch_activity', null);
+    await header(root, { buttons: [await textBtn(S('header_more'), () => openToolbar(v), true), await iconBtn('@drawable/search_drawable', () => openSearch())] });
+    // player placeholder in layout: replace with our view
+    const ph = V.find(root, 'player'); const player = await buildPlayer(v); ph.replaceWith(player);
+    root.__cleanup = () => { if (player.__hls) player.__hls.destroy(); const vid = player.querySelector('video'); if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); } };
+    // info
+    const info = V.find(root, 'info_layout'); V.setVisible(info, true); V.setVisible(V.find(root, 'info_status'), false);
+    const set = (i, t) => { const e = V.find(root, i); if (e) e.querySelector('.t').textContent = t; };
+    set('title', v.title); set('date_added', v.date);
+    set('views_likes_dislikes', fmtS('num_views_likes_and_dislikes', v.views, v.likes, v.dislikes));
+    set('channel', v.author); set('description', v.desc); set('category', v.category || '-'); set('tags', v.tags || '-');
+    V.find(root, 'to_channel').onclick = () => go('channel', { who: v.author }); V.find(root, 'to_channel').style.cursor = 'pointer';
+    const ch = V.find(root, 'channel'); ch.style.padding = '0 14px'; ch.style.cursor = 'pointer';
+    const ws = V.find(root, 'workspace');
+    const infoPage = ws.querySelector('[data-id="watch_video_info"]');
+    const related = V.find(root, 'related'), comments = V.find(root, 'comments');
+    await fillList(related, v.relatedPage, videoItem);
+    const cm = v.commentsPage || await API.comments(v.commentsToken);
+    const add = await V.inflate('add_comment_button', null).catch(() => null);
+    const addBtn = el('div', '', { margin: '6px 5px', padding: '12px', textAlign: 'center', fontSize: '13px', cursor: 'pointer', color: '#fff', border: '1px solid #444', borderRadius: '6px', background: 'linear-gradient(#444,#222)' }); addBtn.textContent = S('comment_hint'); addBtn.onclick = () => commentDialog(comments);
+    const commentItem = async c => { const it = await V.inflate('comment_item', null); V.find(it, 'author').querySelector('.t').textContent = c.author; V.find(it, 'comment').querySelector('.t').textContent = c.text; V.find(it, 'time').querySelector('.t').textContent = c.time; return it; };
+    await fillList(comments, cm, commentItem, 'no_comments_found'); comments.prepend(addBtn);
+    // pages: tabs from the original tag strings
+    const pages = [infoPage, related, comments]; pages.forEach(p => { p.style.width = '100%'; p.style.height = '100%'; });
+    infoPage.style.display = 'grid'; infoPage.__disp = 'grid';
+    if (TABLET) {
+      // layout-sw600dp/watch_controller.xml: player + info on the left, Related (2-column grid) / Comments tabs on the right
+      await fillList(related, v.relatedPage, videoItem, null, 2);
+      const body = el('div', '', { display: 'flex', flex: '1 1 0', minHeight: '0', width: '100%' });
+      const left = el('div', '', { flex: '0 0 58%', display: 'flex', flexDirection: 'column', minWidth: '0', borderRight: '1px solid #222' });
+      const right = el('div', '', { flex: '1 1 0', display: 'flex', flexDirection: 'column', minWidth: '0' });
+      const tabrow = V.find(root, 'tabrow');
+      player.parentNode.insertBefore(body, player); left.appendChild(player);
+      infoPage.style.flex = '1 1 0'; infoPage.style.minHeight = '0'; infoPage.style.height = 'auto'; left.appendChild(infoPage);
+      right.append(tabrow, ws); ws.style.flex = '1 1 0'; ws.style.minHeight = '0'; ws.style.height = 'auto'; ws.style.position = 'relative';
+      body.append(left, right);
+      [related, comments].forEach(p => { p.style.position = 'absolute'; p.style.inset = '0'; p.style.height = 'auto'; });
+      await tabs(root, [S('video_info_related_label_text'), S('comments')], [related, comments]);
+      infoPage.style.display = 'grid';
+      return root;
+    }
+    await tabs(root, [S('video_info'), S('video_info_related_label_text'), S('comments')], pages);
+    return root;
+  };
+
+  function loadHls() { return window.Hls ? Promise.resolve() : new Promise((ok, no) => { const s = document.createElement('script'); s.src = 'lib/hls.min.js'; s.onload = ok; s.onerror = no; document.body.appendChild(s); }); }
+  const isApple = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) || (/Safari/.test(navigator.userAgent) && !/Chrome|Chromium|Android/.test(navigator.userAgent));
+  // Videos: progressive 360p MP4 (itag 18, the only full-length format YouTube serves without a PO token). Live: HLS.
+  // Picks the stream for a quality: q = 'auto' or a height. Normal videos: 360 = progressive MP4 (starts at once),
+  // anything else = HLS from /qhls (prepared by yt-dlp on the server). Live: HLS from /hls. ?h= keeps only that height,
+  // so the choice also works with Safari's built-in HLS player, which cannot be told which level to use.
+  async function attachSource(P, vid, v, q, onFail) {
+    const resume = vid.currentTime || 0, wasPaused = vid.paused && resume > 0;   // read before destroy(): detaching resets the time
+    if (P.__hls) { P.__hls.destroy(); P.__hls = null; }
+    const seekBack = () => { if (resume > 1 && !v.live) { try { vid.currentTime = resume; } catch (e) {} } if (!wasPaused) vid.play().catch(() => {}); };
+    vid.addEventListener('loadedmetadata', seekBack, { once: true });
+    const applyRate = () => { vid.defaultPlaybackRate = vid.playbackRate = P.__rate || 1; };
+    vid.addEventListener('loadedmetadata', applyRate, { once: true });
+    // a picked audio track is only available through HLS, so 360p then also goes through HLS
+    if (v.demo || (!v.live && q === 360 && !P.__audio)) { P.__mode = 'mp4'; vid.src = v.src; return; }
+    const qs = [q !== 'auto' ? 'h=' + q : '', P.__audio ? 'a=' + encodeURIComponent(P.__audio) : ''].filter(Boolean).join('&');
+    const url = (v.live ? '/hls/' : '/qhls/') + v.id + '.m3u8' + (qs ? '?' + qs : '');
+    const fallback = () => { if (P.__hls) { P.__hls.destroy(); P.__hls = null; } if (v.live) return onFail('Live stream unavailable'); onFail('This quality is not available, playing 360p'); P.__setQ && P.__setQ(360, true); };
+    const native = () => { P.__mode = 'native'; vid.src = url; vid.addEventListener('error', fallback, { once: true }); };
+    if (isApple && vid.canPlayType('application/vnd.apple.mpegurl')) return native();
+    try { await loadHls(); } catch (e) {}
+    if (window.Hls && Hls.isSupported()) {
+      const h = new Hls({ lowLatencyMode: !!v.live, capLevelToPlayerSize: false, maxBufferLength: 30 }); P.__hls = h; P.__mode = 'hls';
+      h.on(Hls.Events.ERROR, (e, d) => { if (!d.fatal) return; if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !h.__recovered) { h.__recovered = true; h.recoverMediaError(); } else fallback(); });
+      h.loadSource(url); h.attachMedia(vid); return;
+    }
+    if (vid.canPlayType('application/vnd.apple.mpegurl')) return native();
+    fallback();
+  }
+  const fmtTime = s => D.dur(Math.max(0, Math.floor(s || 0)));
+  async function buildPlayer(v) {
+    const P = el('div', 'player', { position: 'relative', width: '100%', aspectRatio: '16/9', background: '#000', marginBottom: '1px', overflow: 'hidden', flex: '0 0 auto', touchAction: 'manipulation' });
+    const vid = el('video', '', { position: 'absolute', inset: '0', width: '100%', height: '100%', objectFit: 'contain', background: '#000' });
+    vid.poster = v.thumb;
+    vid.playsInline = true; vid.preload = 'auto'; vid.setAttribute('webkit-playsinline', ''); vid.setAttribute('playsinline', ''); P.appendChild(vid);
+    const hud = el('div', 'hud', { position: 'absolute', inset: '0', transition: 'opacity .25s' }); P.appendChild(hud);
+    const shade = el('div', '', { position: 'absolute', left: 0, right: 0, bottom: 0, height: '56px', background: 'linear-gradient(transparent,rgba(0,0,0,.65))' }); hud.appendChild(shade);
+    const center = el('div', '', { position: 'absolute', left: '50%', top: '50%', width: '166px', height: '166px', margin: '-83px 0 0 -83px', background: `url(apps/v22/res/drawable-hdpi-v4/video_hud_center.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(center);
+    const glyph = el('div', '', { position: 'absolute', left: '50%', top: '50%', backgroundRepeat: 'no-repeat', backgroundSize: '100% 100%' }); center.appendChild(glyph);
+    // Both glyph images are drawn at their natural size (dp = px / 1.5) and centred, so play and pause stay the same visual size.
+    const setGlyph = async playing => { const nm = playing ? 'ic_vidcontrol_pause' : 'ic_vidcontrol_play'; const d = await RT.drawable('@drawable/' + nm); const p = RT.pick(d, {}) || d; glyph.style.width = p.w + 'px'; glyph.style.height = p.h + 'px'; glyph.style.margin = `${-p.h / 2}px 0 0 ${-p.w / 2}px`; glyph.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/${nm}.png)`; };
+    const side = async (nm, dx, fn) => { const d = await RT.drawable('@drawable/' + nm); const p = RT.pick(d, {}) || d; const b = el('div', '', { position: 'absolute', left: `calc(50% + ${dx}px)`, top: '50%', width: p.w + 'px', height: p.h + 'px', margin: `${-p.h / 2}px 0 0 ${-p.w / 2}px`, background: `url(apps/v22/res/drawable-hdpi-v4/${nm}.png) center/100% 100%`, cursor: 'pointer' }); b.onclick = e => { e.stopPropagation(); fn(); }; hud.appendChild(b); };
+    const nextV = (v.related || [])[0];
+    await side('ic_vidcontrol_prev', -96, () => vid.currentTime = 0);
+    await side('ic_vidcontrol_next', 96, () => nextV && go('watch', { id: nextV.id }, true));
+    // scrubber
+    const bar = el('div', '', { position: 'absolute', left: '44px', right: '138px', bottom: '14px', height: '4px', background: '#212121', cursor: 'pointer' }); hud.appendChild(bar);
+    const prog = el('div', '', { position: 'absolute', left: 0, top: 0, bottom: 0, width: '0', background: '#dd0000' }); bar.appendChild(prog);
+    const knob = el('div', '', { position: 'absolute', top: '-30px', width: '24px', height: '37px', marginLeft: '-12px', background: `url(apps/v22/res/drawable-hdpi-v4/scrubber_knob.png) center/100% 100% no-repeat`, left: 0 }); bar.appendChild(knob);
+    const tcur = el('div', '', { position: 'absolute', left: '6px', bottom: '8px', fontSize: '12px', color: '#fff' }); tcur.textContent = '0:00'; hud.appendChild(tcur);
+    const ttot = el('div', '', { position: 'absolute', right: '94px', bottom: '8px', fontSize: '12px', color: '#fff' }); ttot.textContent = fmtTime(v.dur); hud.appendChild(ttot);
+    const fs = el('div', '', { position: 'absolute', right: '8px', bottom: '8px', width: '32px', height: '33px', background: `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreenoff.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(fs);
+    const hq = el('div', '', { position: 'absolute', right: '6px', top: '4px', width: '47px', height: '40px', background: `url(apps/v22/res/drawable-hdpi-v4/btn_hq_off.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(hq);
+    if (v.live) { bar.style.display = 'none'; tcur.style.display = 'none'; ttot.style.display = 'none'; const lv = el('div', '', { position: 'absolute', left: '8px', bottom: '10px', fontSize: '12px', fontWeight: 700, color: '#fff', background: '#cc0000', padding: '1px 6px', borderRadius: '2px' }); lv.textContent = 'LIVE'; hud.appendChild(lv); }
+    // ---- quality: button at the bottom (painted with the app's own button_background drawable) + list dialog ----
+    const qBtn = el('div', '', { position: 'absolute', right: '44px', bottom: '7px', minWidth: '44px', height: '26px', padding: '0 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700, color: '#fff', cursor: 'pointer', isolation: 'isolate' });
+    const qBg = el('div'); const qLabel = el('span'); qBtn.append(qBg, qLabel); hud.appendChild(qBtn);
+    const btnD = await RT.drawable('@drawable/button_background');
+    const paintQ = st => { RT.paint(qBg, btnD, st); qBg.style.borderWidth = '6px'; qBg.style.borderImageWidth = '6px'; };
+    paintQ({}); qBtn.addEventListener('pointerdown', () => paintQ({ pressed: true })); ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => qBtn.addEventListener(e, () => paintQ({})));
+    const label = q => q === 'auto' ? 'Auto' : q + 'p';
+    let heights = v.demo ? [360] : null, audio = [];
+    const loadHeights = () => P.__heights || (P.__heights = fetch('/api/qualities?id=' + v.id + (v.live ? '&live=1' : '')).then(r => r.ok ? r.json() : { heights: [] }).then(r => { audio = (r.audio || []).sort((x, y) => (/original/i.test(y.name) || y.def) - (/original/i.test(x.name) || x.def)); heights = (r.heights || []).filter(x => x >= 144); if (!v.live && !heights.includes(360)) heights.push(360); heights.sort((a, b) => b - a); return heights; }).catch(() => (heights = [360])));
+    const saved = localStorage.quality ? (localStorage.quality === 'auto' ? 'auto' : +localStorage.quality) : (localStorage.default_hq === '1' ? 'auto' : 360);
+    let q = v.live ? (saved === 360 ? 'auto' : saved) : saved;
+    const hqOn = () => q === 'auto' || q > 480;
+    P.__rate = +localStorage.speed || 1;
+    const show_ = () => { qLabel.textContent = label(q) + (P.__rate !== 1 ? ' · ' + P.__rate + 'x' : ''); hq.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/btn_hq_${hqOn() ? 'on' : 'off'}.png)`; };
+    P.__setQ = (nq, noSave) => { q = nq; if (!noSave) localStorage.quality = String(nq); show_(); attachSource(P, vid, v, q, msg => toast(msg)); };
+    // first source: normal videos start on the 360p MP4 right away, then switch once the chosen quality is ready
+    q === 360 || v.demo || v.live ? attachSource(P, vid, v, v.demo ? 360 : q, msg => toast(msg)) : (attachSource(P, vid, v, 360, msg => toast(msg)), loadHeights().then(hs => { if (!P.isConnected) return; const pick = q === 'auto' ? 'auto' : (hs.find(x => x <= q) || 360); if (pick === 360) { q = 360; show_(); } else P.__setQ(pick, true); }));
+    show_();
+    // Menu: Quality / Playback speed / Audio track (the last only when the video has more than one)
+    const pickList = (title, opts, cur, onPick) => {
+      const list = el('div');
+      for (const [val, text] of opts) {
+        const it = el('div', '', { padding: '12px 4px', fontSize: '17px', borderBottom: '1px solid #444', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', gap: '8px' });
+        const a1 = el('span'); a1.textContent = text; const a2 = el('span', '', { color: '#33b5e5' }); a2.textContent = val === cur ? '✓' : '';
+        it.append(a1, a2); it.onclick = () => { closeDialogs(); if (val !== cur) onPick(val); }; list.appendChild(it);
+      }
+      dialog(title, list, [['Cancel', closeDialogs]]);
+    };
+    const audioName = id => { const t = audio.find(x => x.id === id); return t ? t.name : 'Default'; };
+    const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+    const openQuality = async () => { const hs = heights || await loadHeights(); pickList('Video quality', [['auto', 'Auto'], ...hs.map(x => [x, x + 'p' + (x >= 720 ? ' HD' : '')])], q, opt => P.__setQ(opt)); };
+    const openSpeed = () => pickList('Playback speed', SPEEDS.map(x => [x, x === 1 ? 'Normal' : x + 'x']), P.__rate, r => { P.__rate = r; localStorage.speed = r; vid.defaultPlaybackRate = vid.playbackRate = r; show_(); });
+    const openAudio = () => pickList('Audio track', audio.map(t => [t.id, t.name]), P.__audio || (audio.find(t => t.def || /original/i.test(t.name)) || {}).id, id => { P.__audio = id; attachSource(P, vid, v, q, msg => toast(msg)); toast(audioName(id)); });
+    qBtn.onclick = async e => {
+      e.stopPropagation();
+      const list = el('div'); const wait_ = el('div', '', { padding: '14px 4px', color: '#aaa', fontSize: '15px' }); wait_.textContent = 'Loading…'; list.appendChild(wait_);
+      const dlg = dialog('Options', list, [['Cancel', closeDialogs]]);
+      if (!heights) await loadHeights(); if (!document.body.contains(dlg)) return;
+      list.replaceChildren();
+      const row = (title, value, fn) => { const it = el('div', '', { padding: '10px 4px', borderBottom: '1px solid #444', cursor: 'pointer' }); const t1 = el('div', '', { fontSize: '18px' }); t1.textContent = title; const t2 = el('div', '', { fontSize: '14px', color: '#bbb' }); t2.textContent = value; it.append(t1, t2); it.onclick = () => { closeDialogs(); fn(); }; list.appendChild(it); };
+      row('Quality', label(q), openQuality);
+      row('Playback speed', P.__rate === 1 ? 'Normal' : P.__rate + 'x', openSpeed);
+      if (audio.length > 1) row('Audio track', P.__audio ? audioName(P.__audio) : (audio.find(t => t.def || /original/i.test(t.name)) || audio[0]).name, openAudio);
+    };
+    // the original top-right HQ button stays as a quick switch: HQ on = Auto (best), HQ off = 360p
+    hq.onclick = e => { e.stopPropagation(); P.__setQ(hqOn() ? 360 : 'auto'); toast(hqOn() ? 'High quality on' : 'High quality off'); };
+    const toggleFs = () => { if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document); else if (P.requestFullscreen) P.requestFullscreen().then(() => window.screen.orientation && window.screen.orientation.lock && window.screen.orientation.lock('landscape').catch(() => {})).catch(() => vid.webkitEnterFullscreen && vid.webkitEnterFullscreen()); else if (P.webkitRequestFullscreen) P.webkitRequestFullscreen(); else if (vid.webkitEnterFullscreen) vid.webkitEnterFullscreen(); };
+    fs.onclick = e => { e.stopPropagation(); toggleFs(); };
+    P.addEventListener('dblclick', e => { e.preventDefault(); toggleFs(); });
+    const onFs = () => { const on = !!(document.fullscreenElement || document.webkitFullscreenElement); fs.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreen${on ? 'on' : 'off'}.png)`; P.style.aspectRatio = on ? 'auto' : '16/9'; };
+    document.addEventListener('fullscreenchange', onFs); document.addEventListener('webkitfullscreenchange', onFs);
+    // buffering spinner
+    const spin = el('div', 'spinner', { position: 'absolute', left: '50%', top: '50%', width: '36px', height: '36px', margin: '-18px 0 0 -18px', display: 'none', pointerEvents: 'none', borderColor: 'rgba(255,255,255,.25)', borderTopColor: '#fff' }); P.appendChild(spin);
+    vid.addEventListener('waiting', () => { spin.style.display = 'block'; }); ['playing', 'canplay', 'pause'].forEach(ev => vid.addEventListener(ev, () => { spin.style.display = 'none'; }));
+    let hideT; const show = () => { hud.style.opacity = 1; hud.style.pointerEvents = 'auto'; clearTimeout(hideT); if (!vid.paused) hideT = setTimeout(() => { hud.style.opacity = 0; hud.style.pointerEvents = 'none'; }, 3000); };
+    const toggle = () => { vid.paused || vid.ended ? vid.play().catch(() => {}) : vid.pause(); };
+    center.onclick = e => { e.stopPropagation(); toggle(); };
+    P.addEventListener('click', e => { if (hud.style.opacity === '0') show(); else if (e.target === vid || e.target === hud || e.target === shade) { hud.style.opacity = hud.style.opacity === '0' ? 1 : 0; hud.style.pointerEvents = hud.style.opacity === '0' ? 'none' : 'auto'; } });
+    vid.addEventListener('play', () => { setGlyph(true); show(); }); vid.addEventListener('pause', () => { setGlyph(false); show(); });
+    vid.addEventListener('ended', () => { setGlyph(false); show(); });
+    vid.addEventListener('timeupdate', () => { const f = vid.currentTime / (vid.duration || v.dur || 1); prog.style.width = f * 100 + '%'; knob.style.left = f * 100 + '%'; tcur.textContent = fmtTime(vid.currentTime); });
+    vid.addEventListener('loadedmetadata', () => { ttot.textContent = fmtTime(vid.duration); });
+    const seek = e => { const r = bar.getBoundingClientRect(); const f = Math.min(1, Math.max(0, ((e.touches ? e.touches[0].clientX : e.clientX) - r.left) / r.width)); vid.currentTime = f * (vid.duration || v.dur || 1); };
+    let drag = false; bar.addEventListener('pointerdown', e => { drag = true; e.stopPropagation(); seek(e); bar.setPointerCapture(e.pointerId); }); bar.addEventListener('pointermove', e => drag && seek(e)); bar.addEventListener('pointerup', () => drag = false);
+    bar.style.padding = '18px 0'; bar.style.backgroundClip = 'content-box'; bar.style.height = '40px'; bar.style.bottom = '-4px'; // bigger touch target
+    prog.style.top = '18px'; prog.style.bottom = '18px'; knob.style.top = '-12px'; shade.style.pointerEvents = 'none';
+    const track = el('div', '', { position: 'absolute', left: 0, right: 0, top: '18px', height: '4px', background: '#212121' }); bar.insertBefore(track, prog); bar.style.background = 'transparent';
+    prog.style.height = '4px'; prog.style.bottom = 'auto';
+    vid.addEventListener('error', () => { if (P.__mode === 'mp4' || v.demo) toast('Video unavailable'); });
+    setGlyph(false);
+    vid.play().catch(() => {});
+    return P;
+  }
+
+  // ---- dialogs / overlays ----
+  let overlay = null;
+  function closeDialogs() { if (overlay) { overlay.remove(); overlay = null; } }
+  const closeMenu = () => closeDialogs(), closeSearch = () => closeDialogs();
+  function toast(msg) {
+    const t = el('div', '', { position: 'absolute', left: '50%', bottom: '60px', transform: 'translateX(-50%)', background: 'rgba(30,30,30,.92)', color: '#fff', fontSize: '14px', padding: '10px 16px', borderRadius: '8px', zIndex: 50, border: '1px solid #555', maxWidth: '80%', textAlign: 'center' });
+    t.textContent = msg; app.appendChild(t); setTimeout(() => t.remove(), 2200);
+  }
+  function overlayBase(dim) { closeDialogs(); overlay = el('div', 'overlay', { position: 'absolute', inset: '0', zIndex: 40, background: dim || 'rgba(0,0,0,.5)' }); overlay.addEventListener('click', e => { if (e.target === overlay) closeDialogs(); }); app.appendChild(overlay); return overlay; }
+  // Froyo-style options menu (icon grid pinned to the bottom)
+  async function toggleMenu() {
+    if (overlay && overlay.dataset.kind === 'menu') return closeDialogs();
+    const o = overlayBase('rgba(0,0,0,.4)'); o.dataset.kind = 'menu';
+    const grid = el('div', '', { position: 'absolute', left: 0, right: 0, bottom: 0, background: 'linear-gradient(#2b2b2b,#000)', borderTop: '1px solid #666', display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', padding: '2px' });
+    const items = [['menu_home', 'ic_menu_home', () => go('home')], ['menu_browse', 'ic_menu_browse', () => go('categories')], ['menu_search', 'ic_menu_search_normal', () => { closeDialogs(); openSearch(); }],
+      ['menu_my_channel', 'ic_menu_my_channel', () => go('mychannel')], ['menu_settings', null, () => go('settings')]];
+    for (const [t, ic, fn] of items) {
+      const b = el('div', '', { height: '64px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '12px', cursor: 'pointer' });
+      const i = el('div', '', { width: '32px', height: '32px', background: ic ? `url(apps/v22/res/drawable-hdpi-v4/${ic}.png) center/100% 100% no-repeat` : '', }); if (!ic) i.style.backgroundImage = `url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%23ddd' d='M19.4 13a7.5 7.5 0 000-2l2.1-1.6-2-3.5-2.5 1a7 7 0 00-1.7-1L15 3.3h-4l-.4 2.6a7 7 0 00-1.7 1l-2.5-1-2 3.5L6.6 11a7.500 7.500 0 000 2l-2.100 1.600 2 3.500 2.500-1a7 7 0 001.700 1l.4 2.600h4l.4-2.600a7 7 0 001.700-1l2.500 1 2-3.500zM12 15.500a3.500 3.500 0 110-7 3.500 3.500 0 010 7z'/></svg>")`;
+      b.appendChild(i); b.appendChild(document.createTextNode(S(t))); b.onclick = fn; grid.appendChild(b);
+    }
+    o.appendChild(grid);
+  }
+  function openSearch() {
+    const o = overlayBase('rgba(0,0,0,.5)'); o.dataset.kind = 'search';
+    const bar = el('div', '', { position: 'absolute', left: 0, right: 0, top: 0, background: '#222', padding: '6px', display: 'flex', gap: '6px', borderBottom: '1px solid #555' });
+    const inp = el('input', '', { flex: '1', fontSize: '16px', padding: '9px', border: '1px solid #888', borderRadius: '4px', background: '#fff', color: '#000', fontFamily: 'inherit', outline: 'none' }); inp.placeholder = S('search_hint'); inp.type = 'search';
+    const go_ = el('div', '', { width: '44px', background: `#444 url(apps/v22/res/drawable-hdpi-v4/ic_menu_search_normal.png) center/28px no-repeat`, borderRadius: '4px', cursor: 'pointer' });
+    const submit = () => { const q = inp.value.trim(); if (q) go('results', { q }); };
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); }); go_.onclick = submit;
+    bar.append(inp, go_); o.appendChild(bar); setTimeout(() => inp.focus(), 50);
+  }
+  async function openToolbar(v) {
+    const o = overlayBase('rgba(0,0,0,.35)'); o.dataset.kind = 'toolbar';
+    const box = el('div', '', { position: 'absolute', left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.76)', display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', padding: '6px 0' });
+    const items = [['like_drawable', 'Like', 'You like this video'], ['dislike_drawable', 'Dislike', 'You dislike this video'], ['favorite_drawable', S('add_favorite'), S('add_favorite_done')], ['save_drawable', S('save_to_playlist'), 'Playlists are not available in this demo'],
+      ['share_drawable', S('share'), 'Share: ' + location.origin + '/?watch=' + v.id], ['copy_url_drawable', S('copy_url_button_text'), 'URL copied'], ['flag_drawable', S('flag'), 'Video flagged']];
+    for (const [dr, label, msg] of items) {
+      const d = await RT.drawable('@drawable/' + dr); const t = await V.inflate('toolbar_item', null); t.style.height = '64px';
+      const p = RT.pick(d, {}); const ic = V.find(t, 'icon'); const set = st => { const q = RT.pick(d, st); ic.__img.style.backgroundImage = `url(${q.url})`; ic.__img.style.backgroundSize = q.w + 'px ' + q.h + 'px'; ic.style.width = q.w + 'px'; ic.style.height = q.h + 'px'; };
+      set({}); V.find(t, 'text').querySelector('.t').textContent = label; t.style.cursor = 'pointer';
+      t.addEventListener('pointerdown', () => set({ pressed: true })); ['pointerup', 'pointerleave'].forEach(e => t.addEventListener(e, () => set({})));
+      t.onclick = () => { closeDialogs(); toast(msg); }; t.style.width = 'auto'; t.style.flex = 'none'; box.appendChild(t);
+    }
+    o.appendChild(box); V.layoutTree(box);
+  }
+  function commentDialog(list) {
+    const o = overlayBase('rgba(0,0,0,.6)');
+    const box = el('div', '', { position: 'absolute', left: '10px', right: '10px', top: '60px', background: '#222', border: '1px solid #666', borderRadius: '6px', padding: '10px' });
+    const t = el('div', '', { fontSize: '18px', marginBottom: '8px' }); t.textContent = S('comment_dialog_title');
+    const ta = el('textarea', '', { width: '100%', height: '90px', fontSize: '14px', fontFamily: 'inherit', padding: '6px' }); ta.placeholder = S('comment_hint');
+    const b = el('div', '', { marginTop: '8px', textAlign: 'center', padding: '10px', border: '1px solid #555', borderRadius: '4px', background: 'linear-gradient(#444,#222)', cursor: 'pointer' }); b.textContent = S('comment_post_button');
+    b.onclick = async () => { if (ta.value.trim()) { D.comments.unshift({ author: D.me.name, text: ta.value.trim(), time: 'just now' }); closeDialogs(); toast(S('comment_done')); const it = await V.inflate('comment_item', null); V.find(it, 'author').querySelector('.t').textContent = D.me.name; V.find(it, 'comment').querySelector('.t').textContent = ta.value; V.find(it, 'time').querySelector('.t').textContent = 'just now'; list.insertBefore(it, list.children[1]); V.layoutTree(it); } };
+    box.append(t, ta, b); o.appendChild(box); ta.focus();
+  }
+
+  // ---- dialogs in the Froyo style ----
+  function dialog(title, bodyEl, buttons) {
+    const o = overlayBase('rgba(0,0,0,.6)'); o.dataset.kind = 'dialog';
+    const box = el('div', '', { position: 'absolute', left: '12px', right: '12px', top: '50%', transform: 'translateY(-50%)', background: '#2b2b2b', border: '1px solid #777', borderRadius: '6px', overflow: 'hidden', maxHeight: '86%', display: 'flex', flexDirection: 'column' });
+    const t = el('div', '', { fontSize: '20px', padding: '10px 14px', borderBottom: '2px solid #33b5e5' }); t.textContent = title;
+    const body = el('div', '', { padding: '12px 14px', fontSize: '15px', overflowY: 'auto' }); body.appendChild(bodyEl);
+    box.append(t, body);
+    if (buttons && buttons.length) { const row = el('div', '', { display: 'flex', gap: '1px', background: '#555', borderTop: '1px solid #555' }); for (const [label, fn] of buttons) { const b = el('div', '', { flex: '1', textAlign: 'center', padding: '12px', background: '#3a3a3a', cursor: 'pointer', fontSize: '16px' }); b.textContent = label; b.onclick = () => fn(); row.appendChild(b); } box.appendChild(row); }
+    o.appendChild(box); return o;
+  }
+  const para = t => { const d = el('div', '', { lineHeight: 1.35 }); d.textContent = t; return d; };
+  async function arrayOf(name) { const d = await RT.xml('values/arrays.xml'); const n = [...d.documentElement.children].find(c => c.getAttribute('name') === name); return n ? [...n.children].map(c => RT.ref(c.textContent.trim())) : []; }
+
+  // ---- Google account ----
+  async function accountDialog() {
+    const st = await API.authStatus();
+    if (st.signedIn) {
+      return dialog('Google account', para((st.profile && st.profile.name) || 'Signed in'), [['Sign out', async () => { await API.authLogout(); closeDialogs(); toast('Signed out'); go('settings', {}, true); }], ['Close', closeDialogs]]);
+    }
+    let timer;
+    const body = el('div'); body.appendChild(para('Sign in to get your own recommendations. You will enter a short code on google.com/device.'));
+    const code = el('div', '', { fontSize: '30px', letterSpacing: '3px', textAlign: 'center', margin: '14px 0', fontWeight: 700, color: '#33b5e5' }); body.appendChild(code);
+    const info = el('div', '', { fontSize: '13px', color: '#aaa', textAlign: 'center' }); body.appendChild(info);
+    const o = dialog('Sign in', body, [['Open google.com/device', () => window.open('https://www.google.com/device', '_blank')], ['Cancel', () => { clearInterval(timer); closeDialogs(); }]]);
+    try {
+      const s = await API.authStart(); code.textContent = s.user_code; info.textContent = 'Waiting for confirmation…';
+      timer = setInterval(async () => {
+        if (!document.body.contains(o)) return clearInterval(timer);
+        const r = await API.authPoll().catch(() => ({ status: 'pending' }));
+        if (r.status === 'ok') { clearInterval(timer); closeDialogs(); toast('Signed in'); go('home', {}, true); }
+        else if (r.status === 'expired' || r.status === 'error') { clearInterval(timer); info.textContent = 'The code expired. Close and try again.'; }
+      }, Math.max(3000, (s.interval || 5) * 1000));
+    } catch (e) { info.textContent = 'Sign-in is not available: ' + e.message; }
+  }
+
+  routes.settings = async () => {
+    const root = el('div', '', { display: 'flex', flexDirection: 'column', background: '#000' });
+    const hh = await V.inflate('header', null); hh.style.width = '100%'; await header(hh, { buttons: [] }); root.appendChild(hh);
+    const list = el('div', '', { flex: '1', overflowY: 'auto' }); root.appendChild(list);
+    const doc = await RT.xml('xml/youtube_preferences.xml'); const A = RT.A;
+    const st = await API.authStatus();
+    const cat = t => { const c = el('div', '', { background: 'linear-gradient(#555,#222)', color: '#fff', fontSize: '14px', padding: '2px 8px', borderBottom: '1px solid #000' }); c.textContent = RT.ref(t); return c; };
+    const row = (title, summary, onClick, ctl) => {
+      const r = el('div', '', { padding: '10px 12px', minHeight: '64px', borderBottom: '1px solid #222', display: 'flex', alignItems: 'center', cursor: onClick ? 'pointer' : 'default' });
+      const txt = el('div', '', { flex: '1' }); const t1 = el('div', '', { fontSize: '18px' }); t1.textContent = title; const t2 = el('div', '', { fontSize: '14px', color: '#bbb' }); t2.textContent = summary || ''; txt.append(t1, t2); r.appendChild(txt);
+      if (ctl) r.appendChild(ctl);
+      if (onClick) { r.onclick = onClick; r.addEventListener('pointerdown', () => r.style.background = 'linear-gradient(#ffd27a,#ffa40c)'); ['pointerup', 'pointerleave'].forEach(e => r.addEventListener(e, () => r.style.background = '')); }
+      return r;
+    };
+    const LINKS = { help: 'https://support.google.com/youtube', mobile_terms: 'https://www.google.com/mobile/terms.html', youtube_terms: 'https://www.youtube.com/t/terms', mobile_privacy: 'https://www.google.com/mobile/privacy.html', youtube_privacy: 'https://www.youtube.com/t/privacy' };
+    const VERSION = '2.2.14 — a port of the YouTube Android app to the browser: smartphone mode, made to work on iOS (Safari) and Android.';
+    for (const c of doc.documentElement.children) {
+      list.appendChild(cat(A(c, 'title')));
+      if (A(c, 'title') === '@string/pref_general_category') list.appendChild(row('Google account', st.signedIn ? ((st.profile && st.profile.name) || 'Signed in') : 'Sign in to get your recommendations', accountDialog));
+      for (const p of c.children) {
+        const key = A(p, 'key'); if (key === 'upload_policy') continue;   // uploading is not part of this port
+        const title = RT.ref(A(p, 'title')), summary = RT.ref(A(p, 'summary') || '');
+        if (p.tagName === 'CheckBoxPreference') {
+          const cb = el('div', '', { width: '32px', height: '32px', border: '2px solid #aaa', borderRadius: '4px', marginLeft: '8px', background: localStorage[key] === '1' ? '#8bc34a' : '#000' });
+          list.appendChild(row(title, summary, () => { localStorage[key] = localStorage[key] === '1' ? '0' : '1'; cb.style.background = localStorage[key] === '1' ? '#8bc34a' : '#000'; }, cb));
+        } else if (p.tagName === 'ListPreference') {
+          const labels = await arrayOf(A(p, 'entries').replace('@array/', '')), vals = await arrayOf(A(p, 'entryValues').replace('@array/', ''));
+          list.appendChild(row(title, summary, () => { const b = el('div'); labels.forEach((l, i) => { const it = el('div', '', { padding: '12px 4px', fontSize: '17px', borderBottom: '1px solid #444', cursor: 'pointer' }); it.textContent = l + (localStorage[key] === vals[i] ? '  ✓' : ''); it.onclick = () => { localStorage[key] = vals[i]; closeDialogs(); }; b.appendChild(it); }); dialog(title, b, [['Cancel', closeDialogs]]); }));
+        } else if (key === 'version') {
+          list.appendChild(row(title, VERSION, null));
+        } else if (LINKS[key]) {
+          list.appendChild(row(title, summary, () => window.open(LINKS[key], '_blank')));
+        } else if (key === 'clear_history') {
+          list.appendChild(row(title, summary, () => { localStorage.removeItem('search_history'); toast('Search history cleared'); }));
+        } else if (key === 'safe_search') {
+          const lv = ['Off', 'Moderate', 'Strict'];
+          list.appendChild(row(title, summary, () => { const b = el('div'); lv.forEach((l, i) => { const it = el('div', '', { padding: '12px 4px', fontSize: '17px', borderBottom: '1px solid #444', cursor: 'pointer' }); it.textContent = l + ((localStorage.safe_search || '1') === String(i) ? '  ✓' : ''); it.onclick = () => { localStorage.safe_search = i; closeDialogs(); }; b.appendChild(it); }); dialog(S('safe_search_dialog_title'), b, [['Cancel', closeDialogs]]); }));
+        } else if (key === 'feedback') {
+          list.appendChild(row(title, summary, () => toast('Feedback is not available in this port')));
+        } else list.appendChild(row(title, summary, () => toast(title)));
+      }
+    }
+    return root;
+  };
+
+  // boot (supports deep link ?watch=ID)
+  const deep = new URLSearchParams(location.search).get('watch');
+  const gq = new URLSearchParams(location.search).get('go');
+  const first = history.state || (gq ? { name: gq.split(':')[0], arg: gq.includes(':') ? { q: gq.split(':')[1], category: gq.split(':')[1], who: gq.split(':')[1] } : {} } : (deep ? { name: 'watch', arg: { id: deep } } : { name: 'home' }));
+  history.replaceState(first, ''); await render(first);
+})().catch(e => { document.body.insertAdjacentHTML('beforeend', '<pre style="color:#f55;position:fixed;top:0;background:#000;padding:8px;z-index:99;white-space:pre-wrap;font-size:11px">' + (e.stack || e) + '</pre>'); });

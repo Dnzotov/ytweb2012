@@ -1,0 +1,21 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+@font-face{font-family:Roboto;font-weight:300;src:url(fonts/roboto-latin-300-normal.woff2)}
+@font-face{font-family:Roboto;font-weight:400;src:url(fonts/roboto-latin-400-normal.woff2)}
+@font-face{font-family:Roboto;font-weight:400;font-style:italic;src:url(fonts/roboto-latin-400-italic.woff2)}
+@font-face{font-family:Roboto;font-weight:500;src:url(fonts/roboto-latin-500-normal.woff2)}
+@font-face{font-family:Roboto;font-weight:700;src:url(fonts/roboto-latin-700-normal.woff2)}
+@font-face{font-family:Roboto;font-weight:400;src:url(fonts/roboto-cyrillic-400-normal.woff2);unicode-range:U+0400-04FF}
+@font-face{font-family:Roboto;font-weight:700;src:url(fonts/roboto-cyrillic-700-normal.woff2);unicode-range:U+0400-04FF}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:Roboto,sans-serif;-webkit-text-size-adjust:100%;overscroll-behavior:none}
+#screen{position:fixed;inset:0;max-width:600px;margin:0 auto;background:#e6e6e6;overflow:hidden;display:flex;flex-direction:column}
+.v>.t{word-wrap:break-word}
+.v .bg{pointer-events:none}
+.v.ListView::-webkit-scrollbar,.v.PagedListView::-webkit-scrollbar{width:0}
+.spinner{border:3px solid rgba(0,0,0,.15);border-top-color:#0099cc;border-radius:50%;animation:sp 1s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+@font-face{font-family:'Droid Sans';font-weight:400;src:url(fonts/DroidSans.ttf)}
+@font-face{font-family:'Droid Sans';font-weight:700;src:url(fonts/DroidSans-Bold.ttf)}
+#screen.app22{font-family:'Droid Sans',Roboto,sans-serif;background:#000;color:#fff}
+#screen.app22 *{-webkit-tap-highlight-color:transparent}
+#screen.tablet{max-width:none}

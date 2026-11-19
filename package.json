@@ -1,0 +1,27 @@
+{
+  "name": "ytweb",
+  "version": "1.0.0",
+  "description": "The YouTube 2.2.14 Android app UI ported to the browser (phone and tablet), with a small Node.js backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "lan": "HOST=0.0.0.0 node server.js",
+    "extract": "node tools/extract-res.js"
+  },
+  "keywords": [
+    "youtube",
+    "android",
+    "retro",
+    "pwa",
+    "froyo"
+  ],
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@fontsource/roboto": "^5.3.0",
+    "hls.js": "^1.7.4"
+  }
+}

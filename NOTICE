@@ -1,0 +1,19 @@
+ytweb — YouTube 2.2.14 Android UI ported to the browser
+Copyright (C) 2026 ytweb contributors
+Licensed under the GNU General Public License v3.0 or later (see LICENSE).
+
+Third-party components included in this repository:
+- hls.js            public/lib/hls.min.js     Apache-2.0   LICENSES/hls.js-Apache-2.0.txt
+- Droid Sans        public/fonts/DroidSans*   Apache-2.0   LICENSES/DroidSans-Apache-2.0.txt
+- Roboto            public/fonts/roboto-*     OFL-1.1      LICENSES/Roboto-OFL-1.1.txt
+
+Referenced, not included:
+- yt2009 (https://github.com/ftde0/yt2009), Apache-2.0 — the InnerTube playback approach in yt.js
+  follows it. LICENSES/yt2009-Apache-2.0.txt
+- yt-dlp (https://github.com/yt-dlp/yt-dlp), Unlicense — optional external program for qualities
+  above 360p and audio tracks.
+
+Not included and not covered by this license:
+- YouTube APK resources (layouts, images, strings) are Google's property. They are extracted
+  locally from an APK you provide (tools/extract-res.js) and are ignored by git.
+- "YouTube" is a trademark of Google LLC. This project is not affiliated with or endorsed by Google.

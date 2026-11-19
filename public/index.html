@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="apps/v22/res/drawable-hdpi-v4/ic_launcher_youtube.png">
+<link rel="apple-touch-icon" href="apps/v22/res/drawable-hdpi-v4/ic_launcher_youtube.png">
+<link rel="stylesheet" href="style.css">
+<title>YouTube</title>
+</head>
+<body>
+<div id="screen"></div>
+<script>
+  // ?v=22 (YouTube 2.2.14, default) or ?v=33 (YouTube 3.3.0)
+  const v = new URLSearchParams(location.search).get('v') || '22';
+  window.RES_BASE = 'apps/v' + v + '/res';
+  window.TEXT_DEFAULT = v === '22' ? '#ffffff' : '#000000';
+  document.getElementById('screen').className = 'app' + v;
+  const load = src => new Promise(ok => { const s = document.createElement('script'); s.src = src; s.onload = ok; document.body.appendChild(s); });
+  (async () => { for (const s of ['android.js', 'views.js', 'data.js', 'api.js', 'apps/v' + v + '/app.js']) await load(s); })();
+</script>
+</body>
+</html>
