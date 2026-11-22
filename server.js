@@ -74,7 +74,7 @@ http.createServer((req, res) => {
   });
   if ((m = /^\/stream\/([\w-]{11})$/.exec(u.pathname))) return yt.stream(m[1], req, res);
   const hq = +u.searchParams.get('h') || 0;
-  const aq = (u.searchParams.get('a') || '').slice(0, 40);
+  const aq = u.searchParams.get('a') || '';
   if ((m = /^\/hls\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.hlsMaster(m[1], res, hq, aq);
   if ((m = /^\/ldvr\/([\w-]{11})\.m3u8$/.exec(u.pathname))) return yt.dvrMaster(m[1], hq, res);
   if ((m = /^\/ldvr\/([\w-]{11})\/(\d+)\.m3u8$/.exec(u.pathname))) return yt.dvrMedia(m[1], +m[2], res, req);

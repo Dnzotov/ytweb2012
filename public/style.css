@@ -19,3 +19,77 @@ html,body{margin:0;height:100%;overflow:hidden;background:#000;font-family:Robot
 #screen.app22{font-family:'Droid Sans',Roboto,sans-serif;background:#000;color:#fff}
 #screen.app22 *{-webkit-tap-highlight-color:transparent}
 #screen.tablet{max-width:none}
+
+.player-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 7px;
+  left: 6px;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  white-space: nowrap;
+}
+.player-controls > * { flex-shrink: 0; }
+.player-controls > .player-scrubber {
+  position: relative;
+  bottom: -11px;
+  flex: 1;
+  height: 40px;
+  margin: -11px 5px 0;
+  cursor: pointer;
+  touch-action: none;
+}
+.player-volume {
+  font-size: 12px;
+  color: #fff;
+}
+.player-volume > summary { min-height: 26px; }
+.player-volume-button {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  place-items: center;
+  width: fit-content;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: bold;
+  cursor: pointer;
+  list-style: none;
+}
+.player-volume-button::-webkit-details-marker { display: none; }
+.player-volume-button[aria-pressed="true"] { color: #ff5c5c; }
+.player-volume-panel {
+  position: absolute;
+  z-index: 1;
+  right: 36px;
+  bottom: 30px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 176px;
+  max-width: calc(100% - 36px);
+  padding: 3px 8px;
+  white-space: normal;
+  border: 1px solid #666;
+  border-radius: 3px;
+  background: linear-gradient(#383838, #181818);
+  box-shadow: 0 2px 5px #0008;
+}
+.player-volume-slider {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  margin: 0;
+  accent-color: #d00;
+  cursor: pointer;
+}
+.player-volume-level {
+  min-width: 4ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

@@ -139,36 +139,53 @@ const b64u = s => Buffer.from(s).toString('base64url');
 function getText(url, ua) {
   return new Promise((ok, no) => { https.get(url, { headers: { 'user-agent': ua || CLIENTS.ANDROID.ua }, timeout: 15000 }, r => { const ch = []; r.on('data', d => ch.push(d)); r.on('end', () => ok({ status: r.statusCode, type: r.headers['content-type'] || '', body: Buffer.concat(ch) })); }).on('error', no); });
 }
-// Keep only H.264 variants (every phone and Safari can decode them) and, when `h` is given, only that height.
-// Audio tracks of an HLS master (dubbed languages, original...). YouTube tags each with YT-EXT-AUDIO-CONTENT-ID.
-const attr = (l, k) => ((new RegExp(k + '="([^"]*)"')).exec(l) || [])[1];
+// YouTube identifies each audio rendition across groups with YT-EXT-AUDIO-CONTENT-ID.
+const attr = (l, k) => ((new RegExp('(?:^|[:,])' + k + '="([^"]*)"')).exec(l) || [])[1];
+const isAudioRendition = l => l.startsWith('#EXT-X-MEDIA:') && /[:,]TYPE=AUDIO(?:,|$)/.test(l);
+const audioId = l => attr(l, 'YT-EXT-AUDIO-CONTENT-ID') || attr(l, 'LANGUAGE') || attr(l, 'NAME');
 function audioOf(txt) {
-  const seen = new Map();
-  for (const l of txt.split('\n')) if (l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/.test(l)) {
-    const id = attr(l, 'YT-EXT-AUDIO-CONTENT-ID') || attr(l, 'LANGUAGE') || attr(l, 'NAME'); if (!id || seen.has(id)) continue;
-    seen.set(id, { id, name: attr(l, 'NAME') || id, lang: attr(l, 'LANGUAGE') || '', def: /DEFAULT=YES/.test(l) });
+  const tracks = new Map();
+  for (const l of txt.split(/\r?\n/)) {
+    if (!isAudioRendition(l)) continue;
+    const id = audioId(l);
+    if (!id) continue;
+    const def = /[:,]DEFAULT=YES(?:,|$)/.test(l);
+    const track = tracks.get(id);
+    if (track) track.def ||= def;
+    else tracks.set(id, { id, name: attr(l, 'NAME') || id, lang: attr(l, 'LANGUAGE') || '', def });
   }
-  return [...seen.values()];
+  return [...tracks.values()];
 }
-// a = audio content id: keep only that track in every audio group (marked DEFAULT) so every player, Safari included, uses it.
-function filterMaster(txt, h, a) {
+function filterMaster(txt, h, a, exactHeight = false) {
+  const lines = txt.split(/\r?\n/);
+  const renditions = new Map();
   if (a) {
-    const groups = {}; txt.split('\n').forEach(l => { if (l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/.test(l)) (groups[attr(l, 'GROUP-ID')] = groups[attr(l, 'GROUP-ID')] || []).push(l); });
-    const keep = new Set(); for (const g in groups) { const m = groups[g].find(l => (attr(l, 'YT-EXT-AUDIO-CONTENT-ID') || attr(l, 'LANGUAGE')) === a); if (m) keep.add(m); else groups[g].filter(l => /DEFAULT=YES/.test(l)).forEach(l => keep.add(l)); }
-    txt = txt.split('\n').filter(l => !(l.startsWith('#EXT-X-MEDIA') && /TYPE=AUDIO/.test(l)) || keep.has(l)).map(l => keep.has(l) ? l.replace('DEFAULT=NO', 'DEFAULT=YES') : l).join('\n');
+    for (const l of lines) {
+      if (!isAudioRendition(l) || audioId(l) !== a) continue;
+      const group = attr(l, 'GROUP-ID');
+      if (group && !renditions.has(group)) renditions.set(group, l);
+    }
   }
-  const lines = txt.split('\n'), out = [];
-  if (h) { const hs = heightsOf(txt); if (hs.length && !hs.includes(h)) h = hs.find(x => x <= h) || hs[hs.length - 1]; }   // nearest available height
+  const out = [];
+  const heights = heightsOf(txt);
+  if (h && !exactHeight && heights.length && !heights.includes(h)) h = heights.find(x => x <= h) || heights.at(-1);
+  let variants = 0;
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (l.startsWith('#EXT-X-STREAM-INF')) {
-      const uri = lines[i + 1]; i++;
-      const codecs = (/CODECS="([^"]+)"/.exec(l) || [])[1] || '', res = +((/RESOLUTION=\d+x(\d+)/.exec(l) || [])[1] || 0);
-      if (codecs && !/avc1/.test(codecs)) continue;
-      if (h && res !== h) continue;
+      const uri = lines[++i];
+      const codecs = attr(l, 'CODECS'), res = +((/RESOLUTION=\d+x(\d+)/.exec(l) || [])[1] || 0);
+      if (!uri || (codecs && !/avc1/.test(codecs)) || (h && res !== h)) continue;
+      if (a && !renditions.has(attr(l, 'AUDIO'))) continue;
       out.push(l, uri);
+      variants++;
+    } else if (a && isAudioRendition(l)) {
+      if (renditions.get(attr(l, 'GROUP-ID')) === l) {
+        out.push(l.replace(/([:,])DEFAULT=NO(?=,|$)/, '$1DEFAULT=YES').replace(/([:,])AUTOSELECT=NO(?=,|$)/, '$1AUTOSELECT=YES'));
+      }
     } else out.push(l);
   }
+  if (!variants && (a || exactHeight)) throw new Error('No quality available with this audio track');
   return out.join('\n');
 }
 const heightsOf = txt => [...new Set([...txt.matchAll(/#EXT-X-STREAM-INF:[^\n]*/g)].filter(m => !/CODECS="(?![^"]*avc1)/.test(m[0])).map(m => +((/RESOLUTION=\d+x(\d+)/.exec(m[0]) || [])[1] || 0)).filter(Boolean))].sort((a, b) => b - a);
@@ -181,7 +198,8 @@ async function hlsMaster(id, res, h, a) {
     const pl = await post('player', { videoId: id, contentCheckOk: true, racyCheckOk: true }, 'ANDROID');
     const m = pl.streamingData && pl.streamingData.hlsManifestUrl; if (!m) throw new Error((pl.playabilityStatus && pl.playabilityStatus.reason) || 'not a live stream');
     const r = await getText(m);
-    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' }); res.end(rewriteM3u8(filterMaster(r.body.toString(), h, a), m));
+    const playlist = rewriteM3u8(filterMaster(r.body.toString(), h, a), m);
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' }); res.end(playlist);
   } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
 }
 function hlsProxy(token, req, res) {
@@ -244,7 +262,12 @@ function ytdlpManifest(id) {
         const manifest = (d.formats || []).map(f => f.manifest_url).find(u => u && /hls_variant/.test(u));
         if (!manifest) return no(new Error('no HLS formats'));
         const r = await getText(manifest);
-        const t = r.body.toString(); ok({ manifest, heights: heightsOf(t), audio: audioOf(t) });
+        if (r.status !== 200) throw new Error('manifest ' + r.status);
+        const t = r.body.toString();
+        const audio = audioOf(t);
+        const defaultAudio = (audio.find(track => /\boriginal\b/i.test(track.name)) || audio.find(track => track.def) || audio[0])?.id || '';
+        const heights = heightsOf(filterMaster(t, 0, defaultAudio, true));
+        ok({ manifest, heights, audio, defaultAudio });
       } catch (e) { no(e); }
     });
   });
@@ -252,13 +275,14 @@ function ytdlpManifest(id) {
   p.catch(() => qCache.delete(id));
   return p;
 }
-async function qualities(id) { const q = await ytdlpManifest(id); return { heights: q.heights, audio: q.audio }; }
+async function qualities(id) { const q = await ytdlpManifest(id); return { heights: q.heights, audio: q.audio, defaultAudio: q.defaultAudio }; }
 async function qualityMaster(id, h, a, res) {
   try {
     const q = await ytdlpManifest(id);
     const r = await getText(q.manifest);
     if (r.status !== 200) { qCache.delete(id); throw new Error('manifest ' + r.status); }
-    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' }); res.end(rewriteM3u8(filterMaster(r.body.toString(), h, a), q.manifest));
+    const playlist = rewriteM3u8(filterMaster(r.body.toString(), h, a || q.defaultAudio, true), q.manifest);
+    res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl', 'cache-control': 'no-store' }); res.end(playlist);
   } catch (e) { res.writeHead(502); res.end(String(e.message || e)); }
 }
 async function liveQualities(id) {

@@ -292,15 +292,25 @@
     await header(root, { buttons: [await textBtn(S('header_more'), () => openToolbar(v), true), await iconBtn('@drawable/search_drawable', () => openSearch())] });
     // player placeholder in layout: replace with our view
     const ph = V.find(root, 'player'); const player = await buildPlayer(v); ph.replaceWith(player);
-    root.__cleanup = () => { if (player.__hls) player.__hls.destroy(); const vid = player.querySelector('video'); if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); } };
+    root.__cleanup = () => { player.__disposeSource(); const vid = player.querySelector('video'); if (vid) { vid.pause(); vid.removeAttribute('src'); vid.load(); } };
     // info
     const info = V.find(root, 'info_layout'); V.setVisible(info, true); V.setVisible(V.find(root, 'info_status'), false);
     const set = (i, t) => { const e = V.find(root, i); if (e) e.querySelector('.t').textContent = t; };
     set('title', v.title); set('date_added', v.date);
     set('views_likes_dislikes', fmtS('num_views_likes_and_dislikes', v.views, v.likes, v.dislikes));
     set('channel', v.author); set('description', v.desc); set('category', v.category || '-'); set('tags', v.tags || '-');
-    V.find(root, 'to_channel').onclick = () => go('channel', { who: v.author, cid: v.channelId }); V.find(root, 'to_channel').style.cursor = 'pointer';
-    const ch = V.find(root, 'channel'); ch.style.padding = '0 14px'; ch.style.cursor = 'pointer';
+    const ch = V.find(root, 'channel');
+    Object.assign(ch.parentElement.style, { alignSelf: 'flex-start', maxWidth: '100%', cursor: 'default' });
+    Object.assign(ch.style, { padding: '0 14px', cursor: 'pointer', flexShrink: '1', minWidth: '0' });
+    ch.setAttribute('role', 'button');
+    ch.tabIndex = 0;
+    ch.onclick = () => go('channel', { who: v.author, cid: v.channelId });
+    ch.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        if (!e.repeat) ch.click();
+      }
+    });
     const ws = V.find(root, 'workspace');
     const infoPage = ws.querySelector('[data-id="watch_video_info"]');
     const related = V.find(root, 'related'), comments = V.find(root, 'comments');
@@ -352,34 +362,67 @@
     return root;
   };
 
-  function loadHls() { return window.Hls ? Promise.resolve() : new Promise((ok, no) => { const s = document.createElement('script'); s.src = 'lib/hls.min.js'; s.onload = ok; s.onerror = no; document.body.appendChild(s); }); }
+  let hlsScript;
+  function loadHls() {
+    if (window.Hls) return Promise.resolve();
+    return hlsScript ||= new Promise((ok, no) => {
+      const s = document.createElement('script');
+      s.src = 'lib/hls.min.js'; s.onload = ok; s.onerror = no;
+      document.body.appendChild(s);
+    }).catch(error => { hlsScript = null; throw error; });
+  }
   const isApple = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) || (/Safari/.test(navigator.userAgent) && !/Chrome|Chromium|Android/.test(navigator.userAgent));
-  // Videos: progressive 360p MP4 (itag 18, the only full-length format YouTube serves without a PO token). Live: HLS.
-  // Picks the stream for a quality: q = 'auto' or a height. Normal videos: 360 = progressive MP4 (starts at once),
-  // anything else = HLS from /qhls (prepared by yt-dlp on the server). Live: HLS from /hls. ?h= keeps only that height,
-  // so the choice also works with Safari's built-in HLS player, which cannot be told which level to use.
-  async function attachSource(P, vid, v, q, onFail) {
-    const resume = vid.currentTime || 0, wasPaused = vid.paused && resume > 0;   // read before destroy(): detaching resets the time
-    if (P.__hls) { P.__hls.destroy(); P.__hls = null; }
-    const seekBack = () => { if (resume > 1 && !v.live) { try { vid.currentTime = resume; } catch (e) {} } if (!wasPaused) vid.play().catch(() => {}); };
-    vid.addEventListener('loadedmetadata', seekBack, { once: true });
-    const applyRate = () => { vid.defaultPlaybackRate = vid.playbackRate = P.__rate || 1; };
-    vid.addEventListener('loadedmetadata', applyRate, { once: true });
-    // a picked audio track is only available through HLS, so 360p then also goes through HLS
-    if (v.demo || (!v.live && q === 360 && !P.__audio)) { P.__mode = 'mp4'; vid.src = v.src; return; }
-    const qs = [q !== 'auto' ? 'h=' + q : '', P.__audio ? 'a=' + encodeURIComponent(P.__audio) : ''].filter(Boolean).join('&');
-    // live: /ldvr = our DVR playlist (rewind up to 2 h); if it fails, YouTube's own 30-second live playlist (/hls)
-    const url = (v.live ? (P.__liveFallback ? '/hls/' : '/ldvr/') : '/qhls/') + v.id + '.m3u8' + (qs ? '?' + qs : '');
-    const fallback = () => { if (P.__hls) { P.__hls.destroy(); P.__hls = null; } if (v.live && !P.__liveFallback) { P.__liveFallback = true; return attachSource(P, vid, v, q, onFail); } if (v.live) return onFail('Live stream unavailable'); onFail('This quality is not available, playing 360p'); P.__setQ && P.__setQ(360, true); };
-    const native = () => { P.__mode = 'native'; vid.src = url; vid.addEventListener('error', fallback, { once: true }); };
-    if (isApple && vid.canPlayType('application/vnd.apple.mpegurl')) return native();
+  async function attachSource(P, vid, v, source, playback, onReady, onFail) {
+    P.__cancelSource();
+    const controller = new AbortController();
+    const { signal } = controller;
+    P.__cancelSource = () => {
+      controller.abort();
+      if (P.__hls) { P.__hls.destroy(); P.__hls = null; }
+    };
+    const fallback = () => {
+      if (signal.aborted) return;
+      if (v.live && !source.track && !source.liveFallback) {
+        return attachSource(P, vid, v, { ...source, liveFallback: true }, playback, onReady, onFail);
+      }
+      P.__cancelSource();
+      onFail();
+    };
+    const listen = { once: true, signal };
+    const ready = () => {
+      if (!v.live && playback.time > 0) { try { vid.currentTime = playback.time; } catch (e) {} }
+      vid.defaultPlaybackRate = vid.playbackRate = P.__rate || 1;
+      onReady();
+      if (!playback.paused) vid.play().catch(() => {});
+    };
+    const setSrc = url => {
+      vid.addEventListener('loadedmetadata', ready, listen);
+      vid.addEventListener('error', fallback, listen);
+      vid.src = url;
+    };
+    if (source.progressive) return setSrc(v.src);
+    const params = new URLSearchParams();
+    if (source.quality !== 'auto') params.set('h', source.quality);
+    if (source.track) params.set('a', source.track);
+    const route = v.live ? (source.liveFallback || source.track ? '/hls/' : '/ldvr/') : '/qhls/';
+    const url = route + v.id + '.m3u8?' + params;
+    if (isApple && vid.canPlayType('application/vnd.apple.mpegurl')) return setSrc(url);
     try { await loadHls(); } catch (e) {}
+    if (signal.aborted) return;
     if (window.Hls && Hls.isSupported()) {
-      const h = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, capLevelToPlayerSize: false, maxBufferLength: 30 }); P.__hls = h; P.__mode = 'hls';
-      h.on(Hls.Events.ERROR, (e, d) => { if (!d.fatal) return; if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !h.__recovered) { h.__recovered = true; h.recoverMediaError(); } else fallback(); });
+      const h = new Hls({ lowLatencyMode: false, liveSyncDurationCount: 3, capLevelToPlayerSize: false, maxBufferLength: 30 });
+      P.__hls = h;
+      h.on(Hls.Events.ERROR, (e, d) => {
+        if (!d.fatal || signal.aborted) return;
+        if (d.type === Hls.ErrorTypes.MEDIA_ERROR && !h.__recovered) {
+          h.__recovered = true;
+          h.recoverMediaError();
+        } else fallback();
+      });
+      vid.addEventListener('loadedmetadata', ready, listen);
       h.loadSource(url); h.attachMedia(vid); return;
     }
-    if (vid.canPlayType('application/vnd.apple.mpegurl')) return native();
+    if (vid.canPlayType('application/vnd.apple.mpegurl')) return setSrc(url);
     fallback();
   }
   const fmtTime = s => D.dur(Math.max(0, Math.floor(s || 0)));
@@ -391,47 +434,161 @@
     const hud = el('div', 'hud', { position: 'absolute', inset: '0', transition: 'opacity .25s' }); P.appendChild(hud);
     const shade = el('div', '', { position: 'absolute', left: 0, right: 0, bottom: 0, height: '56px', background: 'linear-gradient(transparent,rgba(0,0,0,.65))' }); hud.appendChild(shade);
     const center = el('div', '', { position: 'absolute', left: '50%', top: '50%', width: '166px', height: '166px', margin: '-83px 0 0 -83px', background: `url(apps/v22/res/drawable-hdpi-v4/video_hud_center.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(center);
-    const glyph = el('div', '', { position: 'absolute', left: '50%', top: '50%', backgroundRepeat: 'no-repeat', backgroundSize: '100% 100%' }); center.appendChild(glyph);
-    // Both glyph images are drawn at their natural size (dp = px / 1.5) and centred, so play and pause stay the same visual size.
-    const setGlyph = async playing => { const nm = playing ? 'ic_vidcontrol_pause' : 'ic_vidcontrol_play'; const d = await RT.drawable('@drawable/' + nm); const p = RT.pick(d, {}) || d; glyph.style.width = p.w + 'px'; glyph.style.height = p.h + 'px'; glyph.style.margin = `${-p.h / 2}px 0 0 ${-p.w / 2}px`; glyph.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/${nm}.png)`; };
+    const glyph = el('div', '', { position: 'absolute', left: '50%', top: '50%', backgroundRepeat: 'no-repeat', backgroundSize: '100% 100%', pointerEvents: 'none' });
+    center.appendChild(glyph);
+    const setGlyph = playing => {
+      glyph.style.width = (playing ? 65 : 166) / 1.5 + 'px';
+      glyph.style.height = (playing ? 73 : 166) / 1.5 + 'px';
+      // Align the visible glyphs within the HDPI sprites, accounting for their transparent padding.
+      glyph.style.transform = playing ? 'translate(calc(-50% - 5.67px), calc(-50% - 9.67px))' : 'translate(-50%, -50%)';
+      glyph.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_${playing ? 'pause' : 'play'}.png)`;
+    };
     const side = async (nm, dx, fn) => { const d = await RT.drawable('@drawable/' + nm); const p = RT.pick(d, {}) || d; const b = el('div', '', { position: 'absolute', left: `calc(50% + ${dx}px)`, top: '50%', width: p.w + 'px', height: p.h + 'px', margin: `${-p.h / 2}px 0 0 ${-p.w / 2}px`, background: `url(apps/v22/res/drawable-hdpi-v4/${nm}.png) center/100% 100%`, cursor: 'pointer' }); b.onclick = e => { e.stopPropagation(); fn(); }; hud.appendChild(b); };
     const nextV = (v.related || [])[0];
     await side('ic_vidcontrol_prev', -96, () => vid.currentTime = 0);
     await side('ic_vidcontrol_next', 96, () => nextV && go('watch', { id: nextV.id }, true));
-    // scrubber
-    const bar = el('div', '', { position: 'absolute', left: '44px', right: '138px', bottom: '14px', height: '4px', background: '#212121', cursor: 'pointer' }); hud.appendChild(bar);
+    const controls = el('div', 'player-controls');
+    hud.appendChild(controls);
+    const bar = el('div', 'player-scrubber');
+    const times = { marginBottom: '1px', fontSize: '12px', color: '#fff' };
     const prog = el('div', '', { position: 'absolute', left: 0, top: 0, bottom: 0, width: '0', background: '#dd0000' }); bar.appendChild(prog);
     const knob = el('div', '', { position: 'absolute', top: '-30px', width: '24px', height: '37px', marginLeft: '-12px', background: `url(apps/v22/res/drawable-hdpi-v4/scrubber_knob.png) center/100% 100% no-repeat`, left: 0 }); bar.appendChild(knob);
-    const tcur = el('div', '', { position: 'absolute', left: '6px', bottom: '8px', fontSize: '12px', color: '#fff' }); tcur.textContent = '0:00'; hud.appendChild(tcur);
-    const ttot = el('div', '', { position: 'absolute', right: '94px', bottom: '8px', fontSize: '12px', color: '#fff' }); ttot.textContent = fmtTime(v.dur); hud.appendChild(ttot);
-    const fs = el('div', '', { position: 'absolute', right: '8px', bottom: '8px', width: '32px', height: '33px', background: `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreenoff.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(fs);
+    const tcur = el('div', '', times); tcur.textContent = '0:00';
+    const ttot = el('div', '', times); ttot.textContent = v.live ? '' : fmtTime(v.dur);
+    const fs = el('div', '', { marginBottom: '1px', width: '32px', height: '33px', background: `url(apps/v22/res/drawable-hdpi-v4/ic_vidcontrol_fullscreenoff.png) center/100% 100%`, cursor: 'pointer' });
     const hq = el('div', '', { position: 'absolute', right: '6px', top: '4px', width: '47px', height: '40px', background: `url(apps/v22/res/drawable-hdpi-v4/btn_hq_off.png) center/100% 100%`, cursor: 'pointer' }); hud.appendChild(hq);
     // Live: the bar covers the rewind window; the time shows how far behind live you are; tapping LIVE jumps to the live edge.
     let liveBadge = null;
     if (v.live) {
-      ttot.style.display = 'none'; tcur.style.display = 'none'; bar.style.left = '56px';
-      liveBadge = el('div', '', { position: 'absolute', left: '6px', bottom: '9px', fontSize: '12px', fontWeight: 700, color: '#fff', background: '#cc0000', padding: '2px 6px', borderRadius: '2px', cursor: 'pointer' });
-      liveBadge.textContent = 'LIVE'; hud.appendChild(liveBadge);
+      liveBadge = el('div', '', { marginBottom: '2px', fontSize: '12px', fontWeight: 700, color: '#fff', background: '#cc0000', padding: '2px 6px', borderRadius: '2px', cursor: 'pointer' });
+      liveBadge.textContent = 'LIVE';
       liveBadge.addEventListener('click', e => { e.stopPropagation(); const r = rng(); vid.currentTime = (P.__hls && P.__hls.liveSyncPosition) || Math.max(r[0], r[1] - 12); vid.play().catch(() => {}); show(); });
-      const behindT = el('div', '', { position: 'absolute', right: '94px', bottom: '8px', fontSize: '12px', color: '#fff' }); hud.appendChild(behindT); P.__behind = behindT;
     }
     // ---- quality: button at the bottom (painted with the app's own button_background drawable) + list dialog ----
-    const qBtn = el('div', '', { position: 'absolute', right: '44px', bottom: '7px', minWidth: '44px', height: '26px', padding: '0 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700, color: '#fff', cursor: 'pointer', isolation: 'isolate' });
-    const qBg = el('div'); const qLabel = el('span'); qBtn.append(qBg, qLabel); hud.appendChild(qBtn);
+    const qBtn = el('div', 'player-quality', { position: 'relative', minWidth: '44px', height: '26px', padding: '0 6px', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 700, color: '#fff', cursor: 'pointer', isolation: 'isolate' });
     const btnD = await RT.drawable('@drawable/button_background');
-    const paintQ = st => { RT.paint(qBg, btnD, st); qBg.style.borderWidth = '6px'; qBg.style.borderImageWidth = '6px'; };
-    paintQ({}); qBtn.addEventListener('pointerdown', () => paintQ({ pressed: true })); ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => qBtn.addEventListener(e, () => paintQ({})));
+    const stylePlayerButton = button => {
+      const bg = el('div');
+      button.appendChild(bg);
+      const paint = st => {
+        RT.paint(bg, btnD, st);
+        bg.style.borderWidth = '6px';
+        bg.style.borderImageWidth = '6px';
+      };
+      paint({});
+      button.addEventListener('pointerdown', () => paint({ pressed: true }));
+      ['pointerup', 'pointerleave', 'pointercancel'].forEach(e => button.addEventListener(e, () => paint({})));
+    };
+    stylePlayerButton(qBtn);
+    const qLabel = el('span');
+    qBtn.appendChild(qLabel);
+
+    const volume = el('details', 'player-volume');
+    const volumeToggle = el('summary', 'player-volume-button');
+    volumeToggle.textContent = 'Volume';
+    stylePlayerButton(volumeToggle);
+    const volumePanel = el('div', 'player-volume-panel');
+    volume.append(volumeToggle, volumePanel);
+    controls.append(liveBadge || tcur, bar, ttot, volume, qBtn, fs);
+
+    // Some browsers route volume changes through the OS and ignore the media element setter.
+    vid.volume = 0.5;
+    if (vid.volume === 0.5) {
+      const savedVolume = Number(localStorage.getItem('player_volume') ?? 100);
+      vid.volume = Number.isFinite(savedVolume) ? Math.min(100, Math.max(0, savedVolume)) / 100 : 1;
+      const slider = el('input', 'player-volume-slider');
+      Object.assign(slider, { type: 'range', min: '0', max: '100', step: '1' });
+      slider.setAttribute('aria-label', 'Volume');
+      const level = el('span', 'player-volume-level');
+      level.setAttribute('aria-hidden', 'true');
+      const paintVolume = () => {
+        const percent = Math.round(vid.volume * 100) + '%';
+        slider.value = Math.round(vid.volume * 100);
+        level.textContent = percent;
+      };
+      slider.addEventListener('input', () => {
+        vid.volume = slider.valueAsNumber / 100;
+        localStorage.setItem('player_volume', slider.value);
+      });
+      vid.addEventListener('volumechange', paintVolume);
+      paintVolume();
+      volumePanel.append(slider, level);
+    } else {
+      const hint = el('span');
+      hint.textContent = 'Use your device’s volume buttons.';
+      const mute = el('button', 'player-volume-button');
+      mute.type = 'button';
+      mute.textContent = 'Mute';
+      mute.setAttribute('aria-pressed', 'false');
+      stylePlayerButton(mute);
+      mute.onclick = () => { vid.muted = !vid.muted; };
+      vid.addEventListener('volumechange', () => mute.setAttribute('aria-pressed', String(vid.muted)));
+      volumePanel.append(hint, mute);
+    }
+    volume.addEventListener('dblclick', e => e.stopPropagation());
     const label = q => q === 'auto' ? 'Auto' : q + 'p';
-    let heights = v.demo ? [360] : null, audio = [];
-    const loadHeights = () => P.__heights || (P.__heights = fetch('/api/qualities?id=' + v.id + (v.live ? '&live=1' : '')).then(r => r.ok ? r.json() : { heights: [] }).then(r => { audio = (r.audio || []).sort((x, y) => (/original/i.test(y.name) || y.def) - (/original/i.test(x.name) || x.def)); heights = (r.heights || []).filter(x => x >= 144); if (!v.live && !heights.includes(360)) heights.push(360); heights.sort((a, b) => b - a); return heights; }).catch(() => (heights = [360])));
+    let heights = v.demo ? [360] : null, audio = [], defaultAudio = '';
+    let hasHls = true;
+    const loadHeights = () => P.__heights || (P.__heights = fetch('/api/qualities?id=' + v.id + (v.live ? '&live=1' : ''))
+      .then(r => r.ok ? r.json() : {})
+      .catch(() => ({}))
+      .then(r => {
+        audio = r.audio || [];
+        defaultAudio = r.defaultAudio || '';
+        heights = (r.heights || []).filter(h => h >= 144).sort((a, b) => b - a);
+        hasHls = heights.length > 0;
+        if (!hasHls) heights = [360];
+        return heights;
+      }));
     const saved = localStorage.quality ? (localStorage.quality === 'auto' ? 'auto' : +localStorage.quality) : (localStorage.default_hq === '1' ? 'auto' : 360);
-    let q = v.live ? (saved === 360 ? 'auto' : saved) : saved;
+    let q = v.live && saved === 360 ? 'auto' : saved;
     const hqOn = () => q === 'auto' || q > 480;
     P.__rate = +localStorage.speed || 1;
     const show_ = () => { qLabel.textContent = label(q) + (P.__rate !== 1 ? ' · ' + P.__rate + 'x' : ''); hq.style.backgroundImage = `url(apps/v22/res/drawable-hdpi-v4/btn_hq_${hqOn() ? 'on' : 'off'}.png)`; };
-    P.__setQ = (nq, noSave) => { q = nq; if (!noSave) localStorage.quality = String(nq); show_(); attachSource(P, vid, v, q, msg => toast(msg)); };
-    // first source: normal videos start on the 360p MP4 right away, then switch once the chosen quality is ready
-    q === 360 || v.demo || v.live ? attachSource(P, vid, v, v.demo ? 360 : q, msg => toast(msg)) : (attachSource(P, vid, v, 360, msg => toast(msg)), loadHeights().then(hs => { if (!P.isConnected) return; const pick = q === 'auto' ? 'auto' : (hs.find(x => x <= q) || 360); if (pick === 360) { q = 360; show_(); } else P.__setQ(pick, true); }));
+    let active, pendingPlayback, requested = 0, disposed = false;
+    P.__cancelSource = () => {};
+    P.__disposeSource = () => { disposed = true; P.__cancelSource(); };
+    const selectSource = async (quality, { track, save = false } = {}) => {
+      const request = ++requested;
+      if (!v.live && !v.demo && !heights) await loadHeights();
+      if (disposed || request !== requested) return;
+      if (!v.live && active?.progressive && !track) {
+        if (quality !== 360) toast('This quality is unavailable with the current audio track');
+        return;
+      }
+      const progressive = v.demo || (!v.live && !hasHls);
+      if (progressive) quality = 360;
+      else if (!v.live && quality !== 'auto' && !heights.includes(quality)) quality = heights.find(h => h <= quality) || heights.at(-1);
+      const source = { quality, track: track || active?.track || defaultAudio, progressive };
+      const playback = pendingPlayback ||= { time: vid.currentTime || 0, paused: !!active && vid.paused };
+      const start = (next, onError, remember = false) => {
+        q = next.quality;
+        show_();
+        attachSource(P, vid, v, next, playback, () => {
+          active = next;
+          pendingPlayback = null;
+          if (remember) localStorage.quality = String(q);
+        }, onError);
+      };
+      const unavailable = () => {
+        pendingPlayback = null;
+        toast(v.live ? 'Live stream unavailable' : 'Video unavailable');
+      };
+      start(source, () => {
+        if (active && active !== source) {
+          toast('This option is unavailable with the current video');
+          start(active, unavailable);
+        } else if (!active && !v.live && !progressive) {
+          const fallback = { quality: 360, track: '', progressive: true };
+          if (source.quality !== 360 && heights.includes(360)) {
+            const lower = { ...source, quality: 360 };
+            start(lower, () => active === lower ? unavailable() : start(fallback, unavailable));
+          } else start(fallback, unavailable);
+        } else unavailable();
+      }, save);
+    };
+    const setQuality = quality => selectSource(quality, { save: true });
+    selectSource(q);
     show_();
     // Menu: Quality / Playback speed / Audio track (the last only when the video has more than one)
     const pickList = (title, opts, cur, onPick) => {
@@ -445,9 +602,10 @@
     };
     const audioName = id => { const t = audio.find(x => x.id === id); return t ? t.name : 'Default'; };
     const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-    const openQuality = async () => { const hs = heights || await loadHeights(); pickList('Video quality', [['auto', 'Auto'], ...hs.map(x => [x, x + 'p' + (x >= 720 ? ' HD' : '')])], q, opt => P.__setQ(opt)); };
+    const openQuality = async () => { const hs = heights || await loadHeights(); pickList('Video quality', [['auto', 'Auto'], ...hs.map(x => [x, x + 'p' + (x >= 720 ? ' HD' : '')])], q, setQuality); };
     const openSpeed = () => pickList('Playback speed', SPEEDS.map(x => [x, x === 1 ? 'Normal' : x + 'x']), P.__rate, r => { P.__rate = r; localStorage.speed = r; vid.defaultPlaybackRate = vid.playbackRate = r; show_(); });
-    const openAudio = () => pickList('Audio track', audio.map(t => [t.id, t.name]), P.__audio || (audio.find(t => t.def || /original/i.test(t.name)) || {}).id, id => { P.__audio = id; attachSource(P, vid, v, q, msg => toast(msg)); toast(audioName(id)); });
+    const currentTrack = () => active?.progressive ? '' : active?.track || defaultAudio || audio.find(t => t.def)?.id || '';
+    const openAudio = () => pickList('Audio track', audio.map(t => [t.id, t.name]), currentTrack(), id => selectSource(q, { track: id }));
     qBtn.onclick = async e => {
       e.stopPropagation();
       const list = el('div'); const wait_ = el('div', '', { padding: '14px 4px', color: '#aaa', fontSize: '15px' }); wait_.textContent = 'Loading…'; list.appendChild(wait_);
@@ -457,10 +615,10 @@
       const row = (title, value, fn) => { const it = el('div', '', { padding: '10px 4px', borderBottom: '1px solid #444', cursor: 'pointer' }); const t1 = el('div', '', { fontSize: '18px' }); t1.textContent = title; const t2 = el('div', '', { fontSize: '14px', color: '#bbb' }); t2.textContent = value; it.append(t1, t2); it.onclick = () => { closeDialogs(); fn(); }; list.appendChild(it); };
       row('Quality', label(q), openQuality);
       row('Playback speed', P.__rate === 1 ? 'Normal' : P.__rate + 'x', openSpeed);
-      if (audio.length > 1) row('Audio track', P.__audio ? audioName(P.__audio) : (audio.find(t => t.def || /original/i.test(t.name)) || audio[0]).name, openAudio);
+      if (audio.length > 1) row('Audio track', audioName(currentTrack()), openAudio);
     };
     // the original top-right HQ button stays as a quick switch: HQ on = Auto (best), HQ off = 360p
-    hq.onclick = e => { e.stopPropagation(); P.__setQ(hqOn() ? 360 : 'auto'); toast(hqOn() ? 'High quality on' : 'High quality off'); };
+    hq.onclick = e => { e.stopPropagation(); setQuality(hqOn() ? 360 : 'auto'); };
     const toggleFs = () => { if (document.fullscreenElement || document.webkitFullscreenElement) (document.exitFullscreen || document.webkitExitFullscreen).call(document); else if (P.requestFullscreen) P.requestFullscreen().then(() => window.screen.orientation && window.screen.orientation.lock && window.screen.orientation.lock('landscape').catch(() => {})).catch(() => vid.webkitEnterFullscreen && vid.webkitEnterFullscreen()); else if (P.webkitRequestFullscreen) P.webkitRequestFullscreen(); else if (vid.webkitEnterFullscreen) vid.webkitEnterFullscreen(); };
     fs.onclick = e => { e.stopPropagation(); toggleFs(); };
     P.addEventListener('dblclick', e => { e.preventDefault(); toggleFs(); });
@@ -489,7 +647,19 @@
     // buffering spinner
     const spin = el('div', 'spinner', { position: 'absolute', left: '50%', top: '50%', width: '36px', height: '36px', margin: '-18px 0 0 -18px', display: 'none', pointerEvents: 'none', borderColor: 'rgba(255,255,255,.25)', borderTopColor: '#fff' }); P.appendChild(spin);
     vid.addEventListener('waiting', () => { spin.style.display = 'block'; }); ['playing', 'canplay', 'pause'].forEach(ev => vid.addEventListener(ev, () => { spin.style.display = 'none'; }));
-    let hideT; const show = () => { hud.style.opacity = 1; hud.style.pointerEvents = 'auto'; clearTimeout(hideT); if (!vid.paused) hideT = setTimeout(() => { hud.style.opacity = 0; hud.style.pointerEvents = 'none'; }, 3000); };
+    let hideT; const show = () => { hud.style.opacity = 1; hud.style.pointerEvents = 'auto'; clearTimeout(hideT); if (!vid.paused && !volume.open) hideT = setTimeout(() => { hud.style.opacity = 0; hud.style.pointerEvents = 'none'; }, 3000); };
+    volume.addEventListener('focusin', show);
+    volume.addEventListener('toggle', show);
+    volume.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && volume.open) {
+        e.preventDefault();
+        volume.open = false;
+        volumeToggle.focus();
+      }
+    });
+    P.addEventListener('click', e => {
+      if (volume.open && !volume.contains(e.target)) volume.open = false;
+    }, true);
     const toggle = () => { vid.paused || vid.ended ? vid.play().catch(() => {}) : vid.pause(); };
     center.onclick = e => { e.stopPropagation(); toggle(); };
     P.addEventListener('click', e => { if (hud.style.opacity === '0') show(); else if (e.target === vid || e.target === hud || e.target === shade) { hud.style.opacity = hud.style.opacity === '0' ? 1 : 0; hud.style.pointerEvents = hud.style.opacity === '0' ? 'none' : 'auto'; } });
@@ -501,9 +671,9 @@
       const r = rng(), f = r[1] > r[0] ? (vid.currentTime - r[0]) / (r[1] - r[0]) : 1;
       if (!drag) paintF(Math.min(1, Math.max(0, f)));
       tcur.textContent = fmtTime(vid.currentTime);
-      if (liveBadge) { const live = atLive(); liveBadge.style.background = live ? '#cc0000' : '#555'; P.__behind.textContent = live ? '' : '-' + fmtTime(r[1] - vid.currentTime); }
+      if (liveBadge) { const live = atLive(); liveBadge.style.background = live ? '#cc0000' : '#555'; ttot.textContent = live ? '' : '-' + fmtTime(r[1] - vid.currentTime); }
     });
-    vid.addEventListener('loadedmetadata', () => { ttot.textContent = fmtTime(vid.duration); });
+    if (!v.live) vid.addEventListener('loadedmetadata', () => { ttot.textContent = fmtTime(vid.duration); });
     // Scrubbing: the knob follows the finger, a bubble above it shows the target time, the seek happens on release.
     const bubble = el('div', '', { position: 'absolute', bottom: '56px', transform: 'translateX(-50%)', background: 'rgba(0,0,0,.85)', color: '#fff', fontSize: '13px', fontWeight: 700, padding: '3px 8px', borderRadius: '3px', border: '1px solid #666', display: 'none', whiteSpace: 'nowrap', pointerEvents: 'none', zIndex: 3 });
     bar.appendChild(bubble);
@@ -513,20 +683,16 @@
     const atLive = () => { const r = rng(); return r[1] - vid.currentTime < 25; };
     const fAt = e => { const r = bar.getBoundingClientRect(); return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)); };
     const showBubble = f => { const r = rng(); bubble.style.display = 'block'; bubble.style.left = f * 100 + '%'; const t = r[0] + f * (r[1] - r[0]); bubble.textContent = v.live ? (r[1] - t < 25 ? 'LIVE' : '-' + fmtTime(r[1] - t)) : fmtTime(t); };
-    bar.style.touchAction = 'none';
     bar.addEventListener('pointerdown', e => { e.stopPropagation(); drag = true; bar.setPointerCapture(e.pointerId); dragF = fAt(e); paintF(dragF); showBubble(dragF); clearTimeout(hideT); hud.style.opacity = 1; });
     bar.addEventListener('pointermove', e => { if (drag) { dragF = fAt(e); paintF(dragF); showBubble(dragF); } else if (e.pointerType === 'mouse') showBubble(fAt(e)); });
     const endDrag = () => { if (!drag) return; drag = false; bubble.style.display = 'none'; const r = rng(); vid.currentTime = r[0] + dragF * (r[1] - r[0]); show(); };
     bar.addEventListener('pointerup', endDrag); bar.addEventListener('pointercancel', endDrag);
     bar.addEventListener('pointerleave', () => { if (!drag) bubble.style.display = 'none'; });
     bar.addEventListener('click', e => e.stopPropagation());
-    bar.style.padding = '18px 0'; bar.style.backgroundClip = 'content-box'; bar.style.height = '40px'; bar.style.bottom = '-4px'; // bigger touch target
     prog.style.top = '18px'; prog.style.bottom = '18px'; knob.style.top = '-12px'; shade.style.pointerEvents = 'none';
-    const track = el('div', '', { position: 'absolute', left: 0, right: 0, top: '18px', height: '4px', background: '#212121' }); bar.insertBefore(track, prog); bar.style.background = 'transparent';
+    const track = el('div', '', { position: 'absolute', left: 0, right: 0, top: '18px', height: '4px', background: '#212121' }); bar.insertBefore(track, prog);
     prog.style.height = '4px'; prog.style.bottom = 'auto';
-    vid.addEventListener('error', () => { if (P.__mode === 'mp4' || v.demo) toast('Video unavailable'); });
     setGlyph(false);
-    vid.play().catch(() => {});
     return P;
   }
 
